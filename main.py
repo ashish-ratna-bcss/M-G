@@ -54,9 +54,6 @@ logger.addHandler(stream_handler)
 created_dirs    = set()
 last_frame_time = {}
 restart_events  = {}
- 
-logger.info(f"Customer class IDs : {customer_cls_ids}")
-logger.info(f"Staff class IDs    : {staff_cls_ids}")
 
 # Model will be loaded/unloaded dynamically based on business hours
 model = None
