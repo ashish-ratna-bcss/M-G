@@ -364,11 +364,7 @@ def run_camera(cfg):
                         "zone2_rect" : ratios_to_rect(cfg["entry_zone_2_ratios"], frame_w, frame_h),
                     }
                     first_frame_logged = True
- 
-                if not is_business_hours():
-                    time.sleep(1)
-                    continue
- 
+
                 now = time.time()
                 if now - last_frame_time[cam_key] < FRAME_INTERVAL:
                     continue
@@ -584,6 +580,28 @@ def run_camera(cfg):
  
         time.sleep(3)
  
+# ===================== BUSINESS HOURS HELPER =====================
+def get_next_business_start():
+    """
+    Return the next datetime when business hours will start (IST).
+    If already in business hours, return None (start immediately).
+    Otherwise return the datetime of when business hours begin.
+    """
+    now = datetime.now(IST)
+    now_time = now.time()
+    
+    # If currently in business hours, return None
+    if BUSINESS_START <= now_time <= BUSINESS_END:
+        return None
+    
+    # If before business start today, return today's start time
+    if now_time < BUSINESS_START:
+        return now.replace(hour=BUSINESS_START.hour, minute=BUSINESS_START.minute, second=0, microsecond=0)
+    
+    # After business end today, return tomorrow's start time
+    tomorrow = now + __import__('datetime').timedelta(days=1)
+    return tomorrow.replace(hour=BUSINESS_START.hour, minute=BUSINESS_START.minute, second=0, microsecond=0)
+
 # ===================== WATCHDOG =====================
 def watchdog_thread():
     while True:
@@ -600,6 +618,22 @@ def watchdog_thread():
                         last_frame_time[cam_key] = now
  
 # ===================== MAIN =====================
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Meet & Greet runner")
+    parser.add_argument("video", nargs="?", help="Optional local video file to run against a camera config")
+    parser.add_argument("--stream-index", type=int, help="Index of camera in config to run (used with a local video or to select a single camera)")
+    parser.add_argument("--stream-indices", help="Comma-separated camera indices to run (e.g. 0,2,3)")
+    parser.add_argument("--show", action="store_true", help="Force showing preview windows")
+    parser.add_argument("--debug", action="store_true", help="Enable debug logging and show windows")
+    args = parser.parse_args()
+
+    # Wire CLI flags into module globals
+    if args.show:
+        HEADLESS = False
+    if args.debug:
+        HEADLESS = False
+        logger.setLevel(logging.DEBUG)
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Meet & Greet runner")
     parser.add_argument("video", nargs="?", help="Optional local video file to run against a camera config")
@@ -655,22 +689,79 @@ if __name__ == "__main__":
 
     logger.info("🚀 MEET & GREET SYSTEM STARTED (V4 - MULTI-CAMERA PARALLEL)")
     logger.info(f"📷 Total cameras : {len(RTSP_CAMERAS)}")
+    logger.info(f"⏰ Business hours: {BUSINESS_START.strftime('%H:%M')} → {BUSINESS_END.strftime('%H:%M')} IST")
+    logger.info(f"📋 Threads will START/STOP automatically based on business hours")
 
-    for cam in RTSP_CAMERAS:
-        cam_key = cam["camera_id"]
-        restart_events[cam_key]  = Event()
-        last_frame_time[cam_key] = time.time()
-
-    Thread(target=watchdog_thread, daemon=True).start()
-
-    for cam in RTSP_CAMERAS:
-        t = Thread(target=run_camera, args=(cam,), daemon=True, name=cam["camera_id"])
-        t.start()
-        logger.info(f"🎬 Thread started → {cam['camera_id']} ({cam['site_name']}) | mode={cam['zone_mode']}")
+    # ── 24/7 Main Loop ──────────────────────────────────────────────────────────
+    # Check business hours, start/stop threads accordingly
+    active_threads = []
+    watchdog_thread_obj = None
 
     try:
         while True:
-            time.sleep(10)
+            now = datetime.now(IST)
+            in_business = is_business_hours()
+
+            if in_business and not active_threads:
+                # Business hours STARTED — start all camera threads
+                logger.info(f"✅ BUSINESS HOURS ACTIVE ({now.strftime('%H:%M:%S IST')})")
+                logger.info(f"🎬 Starting {len(RTSP_CAMERAS)} camera thread(s)...")
+
+                for cam in RTSP_CAMERAS:
+                    cam_key = cam["camera_id"]
+                    restart_events[cam_key] = Event()
+                    last_frame_time[cam_key] = time.time()
+
+                # Start watchdog only if not already running
+                if watchdog_thread_obj is None:
+                    watchdog_thread_obj = Thread(target=watchdog_thread, daemon=True)
+                    watchdog_thread_obj.start()
+
+                # Start camera threads
+                for cam in RTSP_CAMERAS:
+                    t = Thread(target=run_camera, args=(cam,), daemon=True, name=cam["camera_id"])
+                    t.start()
+                    active_threads.append(t)
+                    logger.info(f"  🎬 → {cam['camera_id']} ({cam['site_name']}) | mode={cam['zone_mode']}")
+
+            elif not in_business and active_threads:
+                # Business hours ENDED — stop threads (by setting restart events, threads will clean up)
+                logger.warning(f"⏸️  BUSINESS HOURS ENDED ({now.strftime('%H:%M:%S IST')})")
+                logger.info(f"🛑 Stopping {len(active_threads)} camera thread(s)...")
+
+                # Signal all threads to stop (they check restart_events periodically)
+                for cam in RTSP_CAMERAS:
+                    cam_key = cam["camera_id"]
+                    if cam_key in restart_events:
+                        restart_events[cam_key].set()
+
+                # Wait briefly for threads to exit gracefully
+                for t in active_threads:
+                    t.join(timeout=5)
+
+                active_threads = []
+                logger.info(f"✅ All threads stopped")
+
+            elif not in_business and not active_threads:
+                # Still outside business hours — wait and check periodically
+                next_start = get_next_business_start()
+                if next_start:
+                    wait_min = round((next_start - now).total_seconds() / 60)
+                    if wait_min % 60 == 0:  # Log every hour
+                        logger.info(f"⏳ Waiting for business hours ({wait_min} minutes remaining)")
+                time.sleep(30)  # Check every 30 seconds
+                continue
+
+            # While in business hours, keep the main loop alive
+            time.sleep(5)
+
     except KeyboardInterrupt:
-        logger.info("🛑 Keyboard interrupt, exiting")
+        logger.info("🛑 Keyboard interrupt, shutting down...")
+        for cam in RTSP_CAMERAS:
+            cam_key = cam["camera_id"]
+            if cam_key in restart_events:
+                restart_events[cam_key].set()
+        for t in active_threads:
+            t.join(timeout=5)
+        logger.info("✅ Shutdown complete")
  

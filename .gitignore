@@ -6,6 +6,22 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# Python packages & distribution
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Environment variables
+.env
+.env.local
+
 # PyTorch model files
 *.pt
 
@@ -23,3 +39,22 @@ outputs/
 
 # Logs
 logs/
+
+# IDE & Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Test & coverage
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Temporary files
+*.tmp
+*.bak
+*.backup
