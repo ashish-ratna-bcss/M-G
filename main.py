@@ -1,0 +1,676 @@
+#!/usr/bin/env python3
+"""
+MEET & GREET KPI - V4 MULTI-CAMERA PRODUCTION
+Unified logic for ALL cameras:
+  - entry_zone_1 (rect or poly)  → session trigger (customer walks in)
+  - entry_zone_2 (rect or poly)  → greet zone     (same as rect-2 in somajiguda)
+  - All zones defined via ratios, converted to pixels at runtime
+  - All cameras run in parallel threads
+"""
+ 
+import os, time, cv2
+from ultralytics import YOLO
+from datetime import datetime, time as dtime
+from zoneinfo import ZoneInfo
+import numpy as np
+import logging
+import json
+from logging.handlers import TimedRotatingFileHandler
+from threading import Thread, Event
+ 
+# ===================== CONFIG (imported) =====================
+from config import (
+    RTSP_CAMERAS, IST, BUSINESS_START, BUSINESS_END, HEADLESS,
+    DEVICE, MODEL_PATH,
+    ENTRY_MARGIN, ENTRY_DEBOUNCE_FRAMES, RECT2_CONFIRM_FRAMES, SESSION_MAX_SEC,
+    GREET_HIT_THRESHOLD, GREET_GAP_TOLERANCE, RECT2_ABSENCE_ABORT_SEC, COOLDOWN_SEC,
+    CONF_THRESHOLD, GREEN_STAFF_LABELS, CUSTOMER_LABEL,
+    MAX_FPS, FRAME_INTERVAL, MIN_W, MIN_H,
+    PANEL_W, PREVIEW_WINDOW_W, PREVIEW_WINDOW_H,
+    OUTPUT_BASE_DIR, LOG_DIR, LOG_FILE, LOG_BACKUP_COUNT,
+)
+import torch
+import argparse
+import sys
+ 
+# ===================== LOGGING =====================
+os.makedirs(LOG_DIR, exist_ok=True)
+logger    = logging.getLogger("MeetGreet")
+logger.setLevel(logging.INFO)
+formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+
+file_handler = TimedRotatingFileHandler(
+    os.path.join(LOG_DIR, LOG_FILE), when="midnight", interval=1, backupCount=LOG_BACKUP_COUNT
+)
+file_handler.setFormatter(formatter)
+logger.addHandler(file_handler)
+
+stream_handler = logging.StreamHandler()
+stream_handler.setFormatter(formatter)
+logger.addHandler(stream_handler)
+ 
+# ===================== GLOBALS =====================
+created_dirs    = set()
+last_frame_time = {}
+restart_events  = {}
+ 
+# ===================== LOAD MODEL =====================
+logger.info(f"🧠 Backend Device Selected: {DEVICE.upper()} (CUDA Available: {torch.cuda.is_available()})")
+model = YOLO(MODEL_PATH)
+model.to(DEVICE)
+ 
+customer_cls_ids = []
+staff_cls_ids    = []
+for idx, name in model.names.items():
+    name_low = name.lower()
+    if CUSTOMER_LABEL in name_low:
+        customer_cls_ids.append(idx)
+    if any(s in name_low for s in GREEN_STAFF_LABELS):
+        staff_cls_ids.append(idx)
+ 
+logger.info(f"Customer class IDs : {customer_cls_ids}")
+logger.info(f"Staff class IDs    : {staff_cls_ids}")
+ 
+# ===================== PATH BUILDER =====================
+def get_output_path(event_type, site_name, camera_id, site_id, dur_str):
+    now      = datetime.now(IST)
+    date_str = now.strftime("%d-%m-%Y")
+    time_str = now.strftime("%H-%M-%S")
+    dir_path = os.path.join(OUTPUT_BASE_DIR, site_name, camera_id, date_str)
+    if dir_path not in created_dirs:
+        os.makedirs(dir_path, exist_ok=True)
+        created_dirs.add(dir_path)
+    filename = f"{event_type}_{site_id}_{camera_id}_{date_str}_{time_str}_{dur_str}.png"
+    return os.path.join(dir_path, filename)
+ 
+# ===================== HELPERS =====================
+def foot(b):
+    """Returns foot center point (bottom-center) of a bounding box."""
+    return ((b[0] + b[2]) // 2, b[3])
+ 
+def is_business_hours():
+    return BUSINESS_START <= datetime.now(IST).time() <= BUSINESS_END
+ 
+def make_fresh_cap(rtsp_url):
+    cap = cv2.VideoCapture(rtsp_url, cv2.CAP_FFMPEG)
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+    return cap
+ 
+def ratios_to_poly(ratios, frame_w, frame_h):
+    """Convert [[x_ratio, y_ratio], ...] → pixel [(x, y), ...] points."""
+    return [(int(r[0] * frame_w), int(r[1] * frame_h)) for r in ratios]
+ 
+def ratios_to_rect(ratios, frame_w, frame_h):
+    """
+    Convert 4-point ratio list to axis-aligned bounding rect (x1,y1,x2,y2).
+    Works for both rect and poly zones when you need a simple rect fallback.
+    """
+    xs = [int(r[0] * frame_w) for r in ratios]
+    ys = [int(r[1] * frame_h) for r in ratios]
+    return (min(xs), min(ys), max(xs), max(ys))
+ 
+# ===================== UNIFIED ZONE CONTAINMENT =====================
+def point_in_zone(px, py, zone_pts, mode):
+    """
+    Check if point (px, py) is inside zone.
+    - rect mode : axis-aligned rectangle with ENTRY_MARGIN
+    - poly mode : polygon using ray-casting (cv2.pointPolygonTest)
+    zone_pts: list of (x, y) pixel tuples (4 points for both modes)
+    """
+    pts = np.array(zone_pts, dtype=np.float32)
+    if mode == "rect":
+        # Use bounding box of the 4 points with margin
+        x1 = int(pts[:, 0].min()) + ENTRY_MARGIN
+        y1 = int(pts[:, 1].min()) + ENTRY_MARGIN
+        x2 = int(pts[:, 0].max()) - ENTRY_MARGIN
+        y2 = int(pts[:, 1].max()) - ENTRY_MARGIN
+        return x1 <= px <= x2 and y1 <= py <= y2
+    else:
+        # Polygon containment
+        result = cv2.pointPolygonTest(pts, (float(px), float(py)), False)
+        return result >= 0
+ 
+def box_in_zone(b, zone_pts, mode):
+    """
+    Check if bounding box b overlaps zone.
+    Tests foot center + box corners against the zone.
+    """
+    cx = (b[0] + b[2]) // 2
+    test_points = [
+        (cx, b[3]),               # foot center
+        (b[0], b[3]),             # bottom-left
+        (b[2], b[3]),             # bottom-right
+        (cx, (b[1] + b[3]) // 2), # body center
+    ]
+    return any(point_in_zone(px, py, zone_pts, mode) for px, py in test_points)
+ 
+def customer_foot_in_zone(customers, zone_pts, mode):
+    """Returns list of customers whose foot center is inside the zone."""
+    return [c for c in customers if point_in_zone(*foot(c), zone_pts, mode)]
+ 
+def staff_intersects_zone(green_staff, zone_pts, mode):
+    """Returns list of staff whose bounding box overlaps the zone."""
+    return [s for s in green_staff if box_in_zone(s, zone_pts, mode)]
+ 
+# ===================== ANNOTATE HELPERS =====================
+def annotate_banner(img, text):
+    font      = cv2.FONT_HERSHEY_SIMPLEX
+    scale     = 2.0
+    thickness = 4
+    (tw, th), _ = cv2.getTextSize(text, font, scale, thickness)
+    h, w = img.shape[:2]
+    bx1, by1 = w - tw - 20, 10
+    bx2, by2 = w - 10, 10 + th + 20
+    cv2.rectangle(img, (bx1, by1), (bx2, by2), (0, 0, 180), -1)
+    cv2.putText(img, text, (bx1 + 10, by1 + th + 10),
+                font, scale, (255, 255, 255), thickness)
+ 
+# ===================== DRAW ZONES ON PREVIEW =====================
+def draw_zones_on_preview(preview, zones, rect2_confirmed, mode):
+    """Draw entry_zone_1 (cyan) and entry_zone_2/greet zone (orange/green)."""
+    z1_pts = np.array(zones["zone1_px"], dtype=np.int32)
+    z2_pts = np.array(zones["zone2_px"], dtype=np.int32)
+ 
+    # entry_zone_1 — cyan
+    if mode == "rect":
+        x1,y1,x2,y2 = zones["zone1_rect"]
+        cv2.rectangle(preview, (x1,y1), (x2,y2), (0, 220, 220), 2)
+        cv2.putText(preview, "ENTRY", (x1, y1 - 6),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 220, 220), 1, cv2.LINE_AA)
+    else:
+        cv2.polylines(preview, [z1_pts], isClosed=True, color=(0, 220, 220), thickness=2)
+        cv2.putText(preview, "ENTRY", zones["zone1_px"][0],
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 220, 220), 1, cv2.LINE_AA)
+ 
+    # entry_zone_2 / greet zone — orange → green when confirmed
+    g_color = (0, 255, 80) if rect2_confirmed else (0, 165, 255)
+    g_thick = 3 if rect2_confirmed else 2
+    if mode == "rect":
+        x1,y1,x2,y2 = zones["zone2_rect"]
+        cv2.rectangle(preview, (x1,y1), (x2,y2), g_color, g_thick)
+        cv2.putText(preview, "GREET ZONE", (x1, y1 - 6),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, g_color, 1, cv2.LINE_AA)
+    else:
+        cv2.polylines(preview, [z2_pts], isClosed=True, color=g_color, thickness=g_thick)
+        cv2.putText(preview, "GREET ZONE", zones["zone2_px"][0],
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, g_color, 1, cv2.LINE_AA)
+ 
+# ===================== PREVIEW HUD =====================
+def draw_hud(frame, state, cfg, now):
+    h, w = frame.shape[:2]
+    hud = np.zeros((h, PANEL_W, 3), dtype=np.uint8)
+    hud[:] = (20, 20, 20)
+    cv2.line(hud, (0, 0), (0, h), (70, 70, 70), 1)
+ 
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    y, lh, px = 28, 26, 12
+ 
+    def txt(text, color=(210, 210, 210), scale=0.5, bold=False):
+        nonlocal y
+        cv2.putText(hud, text, (px, y), font, scale, color,
+                    2 if bold else 1, cv2.LINE_AA)
+        y += lh
+ 
+    def sep():
+        nonlocal y
+        cv2.line(hud, (8, y), (PANEL_W - 8, y), (65, 65, 65), 1)
+        y += 8
+ 
+    txt("MEET & GREET KPI", (0, 200, 255), scale=0.56, bold=True)
+    txt(datetime.now(IST).strftime("%d-%m-%Y  %H:%M:%S"), (140, 140, 140), scale=0.42)
+    txt(f"Site : {cfg['site_name']}",  (160, 160, 160), scale=0.43)
+    txt(f"Cam  : {cfg['camera_id']}", (160, 160, 160), scale=0.43)
+    sep()
+ 
+    biz = is_business_hours()
+    txt("● OPEN" if biz else "● CLOSED", (0,200,80) if biz else (0,0,200), scale=0.5, bold=True)
+    sep()
+ 
+    session         = state.get("session")
+    cooldown_until  = state.get("cooldown_until", 0)
+    rect2_confirmed = state.get("rect2_confirmed", False)
+    in_cooldown     = now < cooldown_until
+ 
+    if in_cooldown:
+        txt(f"COOLDOWN  {cooldown_until - now:.0f}s", (0,130,255), scale=0.52, bold=True)
+    elif session and not session.get("done"):
+        txt("● SESSION ACTIVE", (0,220,80), scale=0.52, bold=True)
+    else:
+        txt("● IDLE", (120,120,120), scale=0.52)
+    sep()
+ 
+    r2_color = (0,220,0) if rect2_confirmed else (80,80,80)
+    txt("GREET ZONE CONFIRMED" if rect2_confirmed else "GREET ZONE PENDING",
+        r2_color, scale=0.44)
+    sep()
+ 
+    txt("GREET PROGRESS", (200,200,200), scale=0.46, bold=True)
+    greet_hits = session["greet_hits"] if session else 0
+    bar_x1, bar_y = px, y
+    bar_w, bar_h  = PANEL_W - px * 2, 18
+    filled = int(bar_w * min(greet_hits, GREET_HIT_THRESHOLD) / GREET_HIT_THRESHOLD)
+    cv2.rectangle(hud, (bar_x1, bar_y), (bar_x1+bar_w, bar_y+bar_h), (50,50,50), -1)
+    bar_color = (0,200,80) if greet_hits >= GREET_HIT_THRESHOLD else (0,130,255)
+    if filled > 0:
+        cv2.rectangle(hud, (bar_x1, bar_y), (bar_x1+filled, bar_y+bar_h), bar_color, -1)
+    cv2.rectangle(hud, (bar_x1, bar_y), (bar_x1+bar_w, bar_y+bar_h), (100,100,100), 1)
+    cv2.putText(hud, f"{greet_hits}/{GREET_HIT_THRESHOLD}",
+                (bar_x1+bar_w//2-18, bar_y+14), font, 0.42, (255,255,255), 1, cv2.LINE_AA)
+    y += bar_h + 8
+    sep()
+ 
+    if session:
+        elapsed = now - session["start"]
+        t_col = (0,200,80) if elapsed < SESSION_MAX_SEC * 0.75 else (0,80,255)
+        txt(f"Session : {elapsed:.1f}s / {SESSION_MAX_SEC}s", t_col, scale=0.44)
+    else:
+        txt("Session : --", (80,80,80), scale=0.44)
+    sep()
+ 
+    txt("DETECTIONS", (200,200,200), scale=0.46, bold=True)
+    txt(f"Customers : {state.get('customer_count', 0)}", (0,220,0),   scale=0.44)
+    txt(f"Staff     : {state.get('staff_count', 0)}",    (255,80,80), scale=0.44)
+    sep()
+ 
+    txt("LEGEND", (200,200,200), scale=0.44, bold=True)
+    for color, label in [
+        ((0,255,0),   " Customer"),
+        ((255,80,0),  " Staff"),
+        ((0,255,255), " Group BBox"),
+        ((0,220,220), " Entry Zone-1"),
+        ((0,165,255), " Greet Zone-2"),
+    ]:
+        cv2.rectangle(hud, (px, y), (px+14, y+14), color, -1)
+        cv2.putText(hud, label, (px+18, y+12), font, 0.4, (180,180,180), 1)
+        y += 20
+ 
+    cv2.putText(hud, "ESC to quit", (px, h-12), font, 0.38, (70,70,70), 1)
+   
+    return np.hstack((frame, hud))
+ 
+# ===================== CAMERA THREAD =====================
+def run_camera(cfg):
+    cam_key  = cfg["camera_id"]
+    rtsp_url = cfg["rtsp_url"]
+    mode     = cfg["zone_mode"]
+ 
+    state = {
+        "session":              None,
+        "rect2_hits":           0,
+        "rect2_confirmed":      False,
+        "rect2_last_seen_time": None,
+        "cooldown_until":       0,
+        "entry_candidate_hits": 0,
+        "customer_count":       0,
+        "staff_count":          0,
+    }
+ 
+    last_frame_time[cam_key] = time.time()
+    zones = {}  # filled after first frame resolves
+ 
+    win_name = f"Meet & Greet — {cam_key}"
+    if not HEADLESS:
+        cv2.namedWindow(win_name, cv2.WINDOW_NORMAL)
+ 
+    while True:  # outer self-restart loop
+        try:
+            cap = make_fresh_cap(rtsp_url)
+            logger.info(f"🎥 STARTED → {cam_key} ({cfg['site_name']}) | mode={mode}")
+ 
+            first_frame_logged = False
+            first_frame_start  = time.time()
+            failed_reads       = 0
+ 
+            while True:
+                # ── Watchdog restart ─────────────────────────────────────────
+                if restart_events[cam_key].is_set():
+                    logger.warning(f"🔄 Watchdog restart → {cam_key}")
+                    restart_events[cam_key].clear()
+                    break
+ 
+                # ── Flush stale buffer ────────────────────────────────────────
+                cap.grab()
+                cap.grab()
+                ret, frame = cap.retrieve()
+ 
+                if not ret:
+                    failed_reads += 1
+                    if failed_reads >= 30:
+                        logger.warning(f"🔄 30 failed reads, reconnecting → {cam_key}")
+                        break
+                    time.sleep(0.1)
+                    continue
+                failed_reads = 0
+               
+                frame = cv2.resize(frame, (PREVIEW_WINDOW_W, PREVIEW_WINDOW_H))
+ 
+                # ── First frame: build zones from ratios ──────────────────────
+                if not first_frame_logged:
+                    if time.time() - first_frame_start > 10:
+                        logger.warning(f"⏳ First frame took >10s → {cam_key}")
+                    frame_h, frame_w = frame.shape[:2]
+                    fps_cam = cap.get(cv2.CAP_PROP_FPS)
+                    logger.info(f"📊 {cam_key} Resolution: {frame_w}x{frame_h} @ {fps_cam:.1f} FPS")
+ 
+                    # Convert ratios → pixel points (works for both rect and poly)
+                    z1_px = ratios_to_poly(cfg["entry_zone_1_ratios"], frame_w, frame_h)
+                    z2_px = ratios_to_poly(cfg["entry_zone_2_ratios"], frame_w, frame_h)
+ 
+                    zones = {
+                        "zone1_px"   : z1_px,   # entry zone pixel points
+                        "zone2_px"   : z2_px,   # greet zone pixel points
+                        # rect fallback (used only for rect mode drawing)
+                        "zone1_rect" : ratios_to_rect(cfg["entry_zone_1_ratios"], frame_w, frame_h),
+                        "zone2_rect" : ratios_to_rect(cfg["entry_zone_2_ratios"], frame_w, frame_h),
+                    }
+                    first_frame_logged = True
+ 
+                if not is_business_hours():
+                    time.sleep(1)
+                    continue
+ 
+                now = time.time()
+                if now - last_frame_time[cam_key] < FRAME_INTERVAL:
+                    continue
+                last_frame_time[cam_key] = now
+ 
+                # ── Session timeout ───────────────────────────────────────────
+                if state["session"] and now - state["session"]["start"] >= SESSION_MAX_SEC:
+                    logger.info(f"⏰ Session timed out → {cam_key}")
+                    state["session"]             = None
+                    state["rect2_hits"]          = 0
+                    state["rect2_confirmed"]      = False
+                    state["rect2_last_seen_time"] = None
+                    state["entry_candidate_hits"] = 0
+ 
+                # ── YOLO Detection ────────────────────────────────────────────
+                results = model.predict(
+                    frame, conf=CONF_THRESHOLD, device=DEVICE,
+                    agnostic_nms=True, verbose=False
+                )[0]
+ 
+                green_staff = []
+                customers   = []
+ 
+                if results.boxes is not None:
+                    boxes = results.boxes.xyxy.cpu().numpy().astype(int)
+                    clss  = results.boxes.cls.cpu().numpy().astype(int)
+                    for b, c in zip(boxes, clss):
+                        if c in staff_cls_ids:
+                            green_staff.append(b)
+                        elif c in customer_cls_ids:
+                            if (b[2]-b[0]) >= MIN_W and (b[3]-b[1]) >= MIN_H:
+                                customers.append(b)
+ 
+                state["customer_count"] = len(customers)
+                state["staff_count"]    = len(green_staff)
+ 
+                # ── ENTRY ZONE (zone1) — session trigger ──────────────────────
+                # foot center of customer must be inside entry_zone_1
+                cust_in_entry = customer_foot_in_zone(customers, zones["zone1_px"], mode)
+ 
+                if cust_in_entry and state["session"] is None:
+                    state["entry_candidate_hits"] += 1
+                    if state["entry_candidate_hits"] >= ENTRY_DEBOUNCE_FRAMES:
+                        state["session"] = {
+                            "start":          now,
+                            "greet_hits":     0,
+                            "last_greet_hit": None,
+                            "done":           False
+                        }
+                        state["entry_candidate_hits"] = 0
+                        logger.info(f"👤 SESSION STARTED → {cam_key}")
+                else:
+                    if state["session"] is None:
+                        state["entry_candidate_hits"] = 0
+ 
+                # ── GREET ZONE (zone2) — rect-2 confirmation ──────────────────
+                # Same logic as rect-2 in somajiguda:
+                # customer foot + staff bbox both inside greet zone → confirm
+                if state["session"] and not state["rect2_confirmed"]:
+                    cust_in_greet  = customer_foot_in_zone(customers,   zones["zone2_px"], mode)
+                    staff_in_greet = staff_intersects_zone(green_staff, zones["zone2_px"], mode)
+ 
+                    if cust_in_greet and staff_in_greet:
+                        state["rect2_hits"] += 1
+                        state["rect2_last_seen_time"] = now
+                    else:
+                        state["rect2_hits"] = 0
+ 
+                    if state["rect2_hits"] >= RECT2_CONFIRM_FRAMES:
+                        state["rect2_confirmed"]      = True
+                        state["rect2_last_seen_time"] = now
+                        logger.info(f"✅ GREET ZONE CONFIRMED → {cam_key}")
+ 
+                # ── ABSENCE ABORT ─────────────────────────────────────────────
+                if (state["session"] and state["rect2_confirmed"] and
+                        state["rect2_last_seen_time"] and
+                        now - state["rect2_last_seen_time"] > RECT2_ABSENCE_ABORT_SEC):
+                    logger.info(f"🚫 Greet zone absence abort → {cam_key}")
+                    state["session"]             = None
+                    state["rect2_confirmed"]      = False
+                    state["rect2_hits"]           = 0
+                    state["rect2_last_seen_time"] = None
+                    state["entry_candidate_hits"] = 0
+ 
+                # ── MEET & GREET hit counting ─────────────────────────────────
+                if (state["session"] and state["rect2_confirmed"] and
+                        not state["session"]["done"] and now >= state["cooldown_until"]):
+ 
+                    cust_in_greet  = customer_foot_in_zone(customers,   zones["zone2_px"], mode)
+                    staff_in_greet = staff_intersects_zone(green_staff, zones["zone2_px"], mode)
+ 
+                    if cust_in_greet and staff_in_greet:
+                        last_hit = state["session"]["last_greet_hit"]
+                        if last_hit is not None and (now - last_hit) > GREET_GAP_TOLERANCE:
+                            state["session"]["greet_hits"] = 1
+                        else:
+                            state["session"]["greet_hits"] += 1
+                        state["session"]["last_greet_hit"] = now
+ 
+                        # ── Save snapshot when threshold reached ──────────────
+                        if state["session"]["greet_hits"] >= GREET_HIT_THRESHOLD:
+                            duration_sec = now - state["session"]["start"]
+                            if int(duration_sec) > 0:
+                                dur_str = (f"{int(duration_sec)}sec"
+                                           if duration_sec < 60
+                                           else f"{round(duration_sec/60,2)}mins")
+ 
+                                snap = frame.copy()
+                                for b in cust_in_greet:
+                                    cv2.rectangle(snap, (b[0],b[1]), (b[2],b[3]), (0,255,0), 4)
+                                    cv2.putText(snap, "CUSTOMER", (b[0], b[1]-10),
+                                                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,255,0), 2)
+                                for b in staff_in_greet:
+                                    cv2.rectangle(snap, (b[0],b[1]), (b[2],b[3]), (0,0,255), 4)
+                                    cv2.putText(snap, "STAFF", (b[0], b[1]-10),
+                                                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,0,255), 2)
+ 
+                                all_boxes = cust_in_greet + staff_in_greet
+                                gx1 = min(b[0] for b in all_boxes)
+                                gy1 = min(b[1] for b in all_boxes)
+                                gx2 = max(b[2] for b in all_boxes)
+                                gy2 = max(b[3] for b in all_boxes)
+                                cv2.rectangle(snap, (gx1,gy1), (gx2,gy2), (0,255,255), 4)
+                                annotate_banner(snap, f"MEET & GREET ({dur_str})")
+ 
+                                greet_path = get_output_path(
+                                    event_type="greet",
+                                    site_name=cfg["site_name"],
+                                    camera_id=cfg["camera_id"],
+                                    site_id=cfg["site_id"],
+                                    dur_str=dur_str
+                                )
+                                cv2.imwrite(greet_path, snap)
+                                # Also write a JSON metadata file alongside the image
+                                try:
+                                    meta = {}
+                                    entry_ts = state["session"]["start"]
+                                    greet_ts = now
+                                    meta["event_type"] = "greet"
+                                    meta["site_name"] = cfg.get("site_name")
+                                    meta["site_id"] = cfg.get("site_id")
+                                    meta["camera_id"] = cfg.get("camera_id")
+                                    meta["entry_time_epoch"] = entry_ts
+                                    meta["greet_time_epoch"] = greet_ts
+                                    meta["greet_delay_sec"] = greet_ts - entry_ts
+                                    meta["greet_hits"] = state["session"].get("greet_hits")
+                                    meta["duration_str"] = dur_str
+                                    # (removed frame dimensions and per-box lists by user request)
+                                    meta["model_path"] = MODEL_PATH if "MODEL_PATH" in globals() else None
+                                    # friendly timestamps in ISO
+                                    try:
+                                        meta["entry_time"] = datetime.fromtimestamp(entry_ts, IST).isoformat()
+                                        meta["greet_time"] = datetime.fromtimestamp(greet_ts, IST).isoformat()
+                                    except Exception:
+                                        meta["entry_time"] = entry_ts
+                                        meta["greet_time"] = greet_ts
+
+                                    json_path = os.path.splitext(greet_path)[0] + ".json"
+                                    with open(json_path, "w") as jf:
+                                        json.dump(meta, jf, indent=2)
+                                except Exception as je:
+                                    logger.warning(f"Failed to write greet metadata JSON: {je}")
+                                logger.info(f"📸 GREET SAVED → {greet_path}")
+ 
+                                state["rect2_last_seen_time"] = now
+                                state["session"]["done"]      = True
+                                state["cooldown_until"]       = now + COOLDOWN_SEC
+ 
+                # ── PREVIEW RENDERING ─────────────────────────────────────────
+                if not HEADLESS:
+                    preview = frame.copy()
+ 
+                    if zones:
+                        draw_zones_on_preview(
+                            preview, zones, state["rect2_confirmed"], mode
+                        )
+ 
+                    for b in customers:
+                        cv2.rectangle(preview, (b[0],b[1]), (b[2],b[3]), (0,255,0), 2)
+                        cv2.putText(preview, "CUSTOMER", (b[0], b[1]-8),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0,255,0), 1, cv2.LINE_AA)
+ 
+                    for b in green_staff:
+                        cv2.rectangle(preview, (b[0],b[1]), (b[2],b[3]), (255,80,0), 2)
+                        cv2.putText(preview, "STAFF", (b[0], b[1]-8),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255,80,0), 1, cv2.LINE_AA)
+ 
+                    # Group bbox when both in greet zone
+                    c_greet = customer_foot_in_zone(customers,   zones["zone2_px"], mode)
+                    s_greet = staff_intersects_zone(green_staff, zones["zone2_px"], mode)
+                    if c_greet and s_greet:
+                        all_b = c_greet + s_greet
+                        cv2.rectangle(preview,
+                                      (min(b[0] for b in all_b), min(b[1] for b in all_b)),
+                                      (max(b[2] for b in all_b), max(b[3] for b in all_b)),
+                                      (0,255,255), 3)
+ 
+                    preview = draw_hud(preview, state, cfg, now)
+                    cv2.imshow(win_name, preview)
+                    key = cv2.waitKey(1) & 0xFF
+                    if key == ord("q") or key == 27:
+                        logger.info(f"🛑 Quit key pressed → {cam_key}")
+                        return
+ 
+        except Exception as e:
+            logger.error(f"❌ Crash in {cam_key}: {str(e)}", exc_info=True)
+            time.sleep(5)
+ 
+        finally:
+            if 'cap' in locals() and cap is not None:
+                cap.release()
+                logger.info(f"🔌 cap released → {cam_key}")
+ 
+        time.sleep(3)
+ 
+# ===================== WATCHDOG =====================
+def watchdog_thread():
+    while True:
+        time.sleep(60)
+        now = time.time()
+        for cam in RTSP_CAMERAS:
+            cam_key = cam["camera_id"]
+            if cam_key in last_frame_time:
+                gap = now - last_frame_time[cam_key]
+                if gap > 60:
+                    logger.error(f"💀 Watchdog: {cam_key} frozen ({gap:.0f}s). Requesting restart.")
+                    if cam_key in restart_events:
+                        restart_events[cam_key].set()
+                        last_frame_time[cam_key] = now
+ 
+# ===================== MAIN =====================
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Meet & Greet runner")
+    parser.add_argument("video", nargs="?", help="Optional local video file to run against a camera config")
+    parser.add_argument("--stream-index", type=int, help="Index of camera in config to run (used with a local video or to select a single camera)")
+    parser.add_argument("--stream-indices", help="Comma-separated camera indices to run (e.g. 0,2,3)")
+    parser.add_argument("--show", action="store_true", help="Force showing preview windows")
+    parser.add_argument("--debug", action="store_true", help="Enable debug logging and show windows")
+    args = parser.parse_args()
+
+    # Wire CLI flags into module globals
+    if args.show:
+        HEADLESS = False
+    if args.debug:
+        HEADLESS = False
+        logger.setLevel(logging.DEBUG)
+
+    # Select cameras to run
+    selected = []
+    if args.video:
+        # Running a single camera config but with a local video file
+        if args.stream_index is None:
+            logger.error("When supplying a local video file, --stream-index must be provided to pick a camera config.")
+            sys.exit(2)
+        si = args.stream_index
+        if si < 0 or si >= len(RTSP_CAMERAS):
+            logger.error(f"stream-index {si} out of range (0..{len(RTSP_CAMERAS)-1})")
+            sys.exit(2)
+        base = dict(RTSP_CAMERAS[si])
+        base["rtsp_url"] = args.video
+        selected = [base]
+    elif args.stream_indices:
+        try:
+            idxs = [int(x.strip()) for x in args.stream_indices.split(",") if x.strip()!='']
+        except Exception:
+            logger.error("Failed to parse --stream-indices, expected comma-separated integers")
+            sys.exit(2)
+        for i in idxs:
+            if i < 0 or i >= len(RTSP_CAMERAS):
+                logger.error(f"stream-index {i} out of range (0..{len(RTSP_CAMERAS)-1})")
+                sys.exit(2)
+            selected.append(RTSP_CAMERAS[i])
+    elif args.stream_index is not None:
+        si = args.stream_index
+        if si < 0 or si >= len(RTSP_CAMERAS):
+            logger.error(f"stream-index {si} out of range (0..{len(RTSP_CAMERAS)-1})")
+            sys.exit(2)
+        selected = [RTSP_CAMERAS[si]]
+    else:
+        selected = list(RTSP_CAMERAS)
+
+    # Replace module RTSP_CAMERAS with the selected subset so watchdog and other code operate on it
+    RTSP_CAMERAS = selected
+
+    logger.info("🚀 MEET & GREET SYSTEM STARTED (V4 - MULTI-CAMERA PARALLEL)")
+    logger.info(f"📷 Total cameras : {len(RTSP_CAMERAS)}")
+
+    for cam in RTSP_CAMERAS:
+        cam_key = cam["camera_id"]
+        restart_events[cam_key]  = Event()
+        last_frame_time[cam_key] = time.time()
+
+    Thread(target=watchdog_thread, daemon=True).start()
+
+    for cam in RTSP_CAMERAS:
+        t = Thread(target=run_camera, args=(cam,), daemon=True, name=cam["camera_id"])
+        t.start()
+        logger.info(f"🎬 Thread started → {cam['camera_id']} ({cam['site_name']}) | mode={cam['zone_mode']}")
+
+    try:
+        while True:
+            time.sleep(10)
+    except KeyboardInterrupt:
+        logger.info("🛑 Keyboard interrupt, exiting")
+ 

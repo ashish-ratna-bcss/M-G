@@ -17,3 +17,9 @@ __pycache__/
 *.flv
 *.wmv
 *.webm
+
+# Output artifacts
+outputs/
+
+# Logs
+logs/
