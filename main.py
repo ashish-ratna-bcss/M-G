@@ -32,6 +32,7 @@ from config import (
 import torch
 import argparse
 import sys
+import gc
  
 # ===================== LOGGING =====================
 os.makedirs(LOG_DIR, exist_ok=True)
@@ -54,22 +55,11 @@ created_dirs    = set()
 last_frame_time = {}
 restart_events  = {}
  
-# ===================== LOAD MODEL =====================
-logger.info(f"🧠 Backend Device Selected: {DEVICE.upper()} (CUDA Available: {torch.cuda.is_available()})")
-model = YOLO(MODEL_PATH)
-model.to(DEVICE)
- 
-customer_cls_ids = []
-staff_cls_ids    = []
-for idx, name in model.names.items():
-    name_low = name.lower()
-    if CUSTOMER_LABEL in name_low:
-        customer_cls_ids.append(idx)
-    if any(s in name_low for s in GREEN_STAFF_LABELS):
-        staff_cls_ids.append(idx)
- 
 logger.info(f"Customer class IDs : {customer_cls_ids}")
 logger.info(f"Staff class IDs    : {staff_cls_ids}")
+
+# Model will be loaded/unloaded dynamically based on business hours
+model = None
  
 # ===================== PATH BUILDER =====================
 def get_output_path(event_type, site_name, camera_id, site_id, dur_str):
@@ -602,6 +592,48 @@ def get_next_business_start():
     tomorrow = now + __import__('datetime').timedelta(days=1)
     return tomorrow.replace(hour=BUSINESS_START.hour, minute=BUSINESS_START.minute, second=0, microsecond=0)
 
+# ===================== MODEL LOADER (handles dynamic loading/unloading) =====================
+customer_cls_ids = []
+staff_cls_ids = []
+
+def load_model_on_gpu():
+    """Load model to GPU when business hours start."""
+    global model, customer_cls_ids, staff_cls_ids
+    if model is not None:
+        return  # Already loaded
+    
+    logger.info(f"🧠 Loading model to {DEVICE.upper()} (CUDA Available: {torch.cuda.is_available()})")
+    model = YOLO(MODEL_PATH)
+    model.to(DEVICE)
+    
+    customer_cls_ids = []
+    staff_cls_ids = []
+    for idx, name in model.names.items():
+        name_low = name.lower()
+        if CUSTOMER_LABEL in name_low:
+            customer_cls_ids.append(idx)
+        if any(s in name_low for s in GREEN_STAFF_LABELS):
+            staff_cls_ids.append(idx)
+    
+    logger.info(f"✅ Model loaded | Customer IDs: {customer_cls_ids} | Staff IDs: {staff_cls_ids}")
+
+def unload_model_from_gpu():
+    """Unload model from GPU when business hours end."""
+    global model
+    if model is None:
+        return  # Already unloaded
+    
+    logger.info(f"🧹 Unloading model from GPU...")
+    del model
+    model = None
+    import gc
+    gc.collect()
+    try:
+        torch.cuda.empty_cache()
+    except:
+        pass
+    logger.info(f"✅ Model unloaded, GPU memory freed")
+
 # ===================== WATCHDOG =====================
 def watchdog_thread():
     while True:
@@ -703,8 +735,9 @@ if __name__ == "__main__":
             in_business = is_business_hours()
 
             if in_business and not active_threads:
-                # Business hours STARTED — start all camera threads
+                # Business hours STARTED — load model and start camera threads
                 logger.info(f"✅ BUSINESS HOURS ACTIVE ({now.strftime('%H:%M:%S IST')})")
+                load_model_on_gpu()
                 logger.info(f"🎬 Starting {len(RTSP_CAMERAS)} camera thread(s)...")
 
                 for cam in RTSP_CAMERAS:
@@ -725,11 +758,11 @@ if __name__ == "__main__":
                     logger.info(f"  🎬 → {cam['camera_id']} ({cam['site_name']}) | mode={cam['zone_mode']}")
 
             elif not in_business and active_threads:
-                # Business hours ENDED — stop threads (by setting restart events, threads will clean up)
+                # Business hours ENDED — stop threads and unload model
                 logger.warning(f"⏸️  BUSINESS HOURS ENDED ({now.strftime('%H:%M:%S IST')})")
                 logger.info(f"🛑 Stopping {len(active_threads)} camera thread(s)...")
 
-                # Signal all threads to stop (they check restart_events periodically)
+                # Signal all threads to stop
                 for cam in RTSP_CAMERAS:
                     cam_key = cam["camera_id"]
                     if cam_key in restart_events:
@@ -741,6 +774,7 @@ if __name__ == "__main__":
 
                 active_threads = []
                 logger.info(f"✅ All threads stopped")
+                unload_model_from_gpu()
 
             elif not in_business and not active_threads:
                 # Still outside business hours — wait and check periodically
