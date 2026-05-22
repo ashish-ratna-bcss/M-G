@@ -1,0 +1,19 @@
+# Data folder
+data/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# PyTorch model files
+*.pt
+
+# Video files
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.flv
+*.wmv
+*.webm
