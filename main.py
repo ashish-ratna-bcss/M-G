@@ -8,13 +8,24 @@ Unified logic for ALL cameras:
   - All cameras run in parallel threads
 """
  
-import os, time, cv2
+import os
+
+# Configure FFmpeg/RTSP transport + timeouts BEFORE cv2 is imported.
+# stimeout is in microseconds. Prevents indefinite hangs in cap.grab()/open.
+os.environ.setdefault(
+    "OPENCV_FFMPEG_CAPTURE_OPTIONS",
+    "rtsp_transport;tcp|stimeout;5000000|reconnect;1|reconnect_streamed;1|reconnect_delay_max;5",
+)
+
+import time
+import cv2
 from ultralytics import YOLO
-from datetime import datetime, time as dtime
+from datetime import datetime, time as dtime, timedelta
 from zoneinfo import ZoneInfo
 import numpy as np
 import logging
 import json
+import gc
 from logging.handlers import TimedRotatingFileHandler
 from threading import Thread, Event
  
@@ -32,7 +43,6 @@ from config import (
 import torch
 import argparse
 import sys
-import gc
  
 # ===================== LOGGING =====================
 os.makedirs(LOG_DIR, exist_ok=True)
@@ -53,7 +63,8 @@ logger.addHandler(stream_handler)
 # ===================== GLOBALS =====================
 created_dirs    = set()
 last_frame_time = {}
-restart_events  = {}
+restart_events  = {}   # signal: break inner loop -> reconnect RTSP
+stop_events     = {}   # signal: exit outer loop -> terminate thread
 
 # Model will be loaded/unloaded dynamically based on business hours
 model = None
@@ -81,6 +92,14 @@ def is_business_hours():
 def make_fresh_cap(rtsp_url):
     cap = cv2.VideoCapture(rtsp_url, cv2.CAP_FFMPEG)
     cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+    # Defensive: some OpenCV builds expose these props; ignore if not supported.
+    for prop_name in ("CAP_PROP_OPEN_TIMEOUT_MSEC", "CAP_PROP_READ_TIMEOUT_MSEC"):
+        prop = getattr(cv2, prop_name, None)
+        if prop is not None:
+            try:
+                cap.set(prop, 5000)
+            except Exception:
+                pass
     return cap
  
 def ratios_to_poly(ratios, frame_w, frame_h):
@@ -298,28 +317,29 @@ def run_camera(cfg):
     win_name = f"Meet & Greet — {cam_key}"
     if not HEADLESS:
         cv2.namedWindow(win_name, cv2.WINDOW_NORMAL)
- 
-    while True:  # outer self-restart loop
+
+    cap = None
+    while not stop_events[cam_key].is_set():  # outer self-restart loop
         try:
             cap = make_fresh_cap(rtsp_url)
             logger.info(f"🎥 STARTED → {cam_key} ({cfg['site_name']}) | mode={mode}")
- 
+
             first_frame_logged = False
             first_frame_start  = time.time()
             failed_reads       = 0
- 
-            while True:
+
+            while not stop_events[cam_key].is_set():
                 # ── Watchdog restart ─────────────────────────────────────────
                 if restart_events[cam_key].is_set():
                     logger.warning(f"🔄 Watchdog restart → {cam_key}")
                     restart_events[cam_key].clear()
                     break
- 
+
                 # ── Flush stale buffer ────────────────────────────────────────
                 cap.grab()
                 cap.grab()
                 ret, frame = cap.retrieve()
- 
+
                 if not ret:
                     failed_reads += 1
                     if failed_reads >= 30:
@@ -367,7 +387,12 @@ def run_camera(cfg):
                     state["entry_candidate_hits"] = 0
  
                 # ── YOLO Detection ────────────────────────────────────────────
-                results = model.predict(
+                # Guard: model may be unloaded during business-hours-end transition.
+                local_model = model
+                if local_model is None:
+                    time.sleep(0.1)
+                    continue
+                results = local_model.predict(
                     frame, conf=CONF_THRESHOLD, device=DEVICE,
                     agnostic_nms=True, verbose=False
                 )[0]
@@ -558,14 +583,29 @@ def run_camera(cfg):
  
         except Exception as e:
             logger.error(f"❌ Crash in {cam_key}: {str(e)}", exc_info=True)
-            time.sleep(5)
- 
+            # Short backoff, but exit immediately if shutdown requested.
+            stop_events[cam_key].wait(timeout=5)
+
         finally:
-            if 'cap' in locals() and cap is not None:
-                cap.release()
-                logger.info(f"🔌 cap released → {cam_key}")
- 
-        time.sleep(3)
+            if cap is not None:
+                try:
+                    cap.release()
+                    logger.info(f"🔌 cap released → {cam_key}")
+                except Exception:
+                    pass
+                cap = None
+
+        if stop_events[cam_key].is_set():
+            break
+        # Backoff before reconnect, but break out fast on shutdown.
+        stop_events[cam_key].wait(timeout=3)
+
+    if not HEADLESS:
+        try:
+            cv2.destroyWindow(win_name)
+        except Exception:
+            pass
+    logger.info(f"🛑 EXITED → {cam_key}")
  
 # ===================== BUSINESS HOURS HELPER =====================
 def get_next_business_start():
@@ -586,7 +626,7 @@ def get_next_business_start():
         return now.replace(hour=BUSINESS_START.hour, minute=BUSINESS_START.minute, second=0, microsecond=0)
     
     # After business end today, return tomorrow's start time
-    tomorrow = now + __import__('datetime').timedelta(days=1)
+    tomorrow = now + timedelta(days=1)
     return tomorrow.replace(hour=BUSINESS_START.hour, minute=BUSINESS_START.minute, second=0, microsecond=0)
 
 # ===================== MODEL LOADER (handles dynamic loading/unloading) =====================
@@ -615,21 +655,21 @@ def load_model_on_gpu():
     logger.info(f"✅ Model loaded | Customer IDs: {customer_cls_ids} | Staff IDs: {staff_cls_ids}")
 
 def unload_model_from_gpu():
-    """Unload model from GPU when business hours end."""
+    """Unload model from GPU when business hours end.
+    Caller MUST ensure all camera threads have exited before calling this,
+    otherwise they may try to invoke .predict() on a freed reference."""
     global model
     if model is None:
         return  # Already unloaded
-    
-    logger.info(f"🧹 Unloading model from GPU...")
-    del model
+
+    logger.info("🧹 Unloading model from GPU...")
     model = None
-    import gc
     gc.collect()
     try:
         torch.cuda.empty_cache()
-    except:
+    except Exception:
         pass
-    logger.info(f"✅ Model unloaded, GPU memory freed")
+    logger.info("✅ Model unloaded, GPU memory freed")
 
 # ===================== WATCHDOG =====================
 def watchdog_thread():
@@ -638,6 +678,10 @@ def watchdog_thread():
         now = time.time()
         for cam in RTSP_CAMERAS:
             cam_key = cam["camera_id"]
+            # Skip cams that are being shut down (off-hours).
+            ev = stop_events.get(cam_key)
+            if ev is None or ev.is_set():
+                continue
             if cam_key in last_frame_time:
                 gap = now - last_frame_time[cam_key]
                 if gap > 60:
@@ -663,21 +707,12 @@ if __name__ == "__main__":
         HEADLESS = False
         logger.setLevel(logging.DEBUG)
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Meet & Greet runner")
-    parser.add_argument("video", nargs="?", help="Optional local video file to run against a camera config")
-    parser.add_argument("--stream-index", type=int, help="Index of camera in config to run (used with a local video or to select a single camera)")
-    parser.add_argument("--stream-indices", help="Comma-separated camera indices to run (e.g. 0,2,3)")
-    parser.add_argument("--show", action="store_true", help="Force showing preview windows")
-    parser.add_argument("--debug", action="store_true", help="Enable debug logging and show windows")
-    args = parser.parse_args()
-
-    # Wire CLI flags into module globals
-    if args.show:
-        HEADLESS = False
-    if args.debug:
-        HEADLESS = False
-        logger.setLevel(logging.DEBUG)
+    # Auto-detect display availability on headless servers
+    disp = os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")
+    if not disp:
+        if not HEADLESS:
+            logger.warning("No display detected (DISPLAY/WAYLAND_DISPLAY unset) — forcing headless mode. GUI will be disabled.")
+        HEADLESS = True
 
     # Select cameras to run
     selected = []
@@ -726,6 +761,61 @@ if __name__ == "__main__":
     active_threads = []
     watchdog_thread_obj = None
 
+    def _start_camera_threads():
+        """Spin up one thread per camera. Reset events + frame timestamps."""
+        global watchdog_thread_obj
+        load_model_on_gpu()
+        logger.info(f"🎬 Starting {len(RTSP_CAMERAS)} camera thread(s)...")
+
+        for cam in RTSP_CAMERAS:
+            cam_key = cam["camera_id"]
+            # Fresh events every cycle so previous-cycle .set() doesn't leak.
+            restart_events[cam_key] = Event()
+            stop_events[cam_key] = Event()
+            last_frame_time[cam_key] = time.time()
+
+        if watchdog_thread_obj is None or not watchdog_thread_obj.is_alive():
+            watchdog_thread_obj = Thread(target=watchdog_thread, daemon=True, name="watchdog")
+            watchdog_thread_obj.start()
+
+        threads = []
+        for cam in RTSP_CAMERAS:
+            t = Thread(target=run_camera, args=(cam,), daemon=True, name=cam["camera_id"])
+            t.start()
+            threads.append(t)
+            logger.info(f"  🎬 → {cam['camera_id']} ({cam['site_name']}) | mode={cam['zone_mode']}")
+        return threads
+
+    def _stop_camera_threads(threads):
+        """Signal stop, join with timeout, then unload model only if all exited."""
+        logger.info(f"🛑 Stopping {len(threads)} camera thread(s)...")
+        # Signal stop FIRST, then nudge inner loop via restart event.
+        for cam in RTSP_CAMERAS:
+            cam_key = cam["camera_id"]
+            if cam_key in stop_events:
+                stop_events[cam_key].set()
+            if cam_key in restart_events:
+                restart_events[cam_key].set()
+
+        for t in threads:
+            t.join(timeout=15)
+
+        alive = [t for t in threads if t.is_alive()]
+        if alive:
+            # Stuck threads (likely blocked in cv2.VideoCapture open). Leave them
+            # as daemons — they'll die with the process. Do NOT unload the model;
+            # they may still call .predict() and segfault on freed CUDA memory.
+            logger.warning(
+                f"⚠️  {len(alive)} thread(s) did not exit in time: "
+                f"{[t.name for t in alive]} — skipping model unload"
+            )
+            return False
+
+        logger.info("✅ All threads stopped")
+        unload_model_from_gpu()
+        return True
+
+    last_idle_log_min = None
     try:
         while True:
             now = datetime.now(IST)
@@ -734,65 +824,51 @@ if __name__ == "__main__":
             if in_business and not active_threads:
                 # Business hours STARTED — load model and start camera threads
                 logger.info(f"✅ BUSINESS HOURS ACTIVE ({now.strftime('%H:%M:%S IST')})")
-                load_model_on_gpu()
-                logger.info(f"🎬 Starting {len(RTSP_CAMERAS)} camera thread(s)...")
-
-                for cam in RTSP_CAMERAS:
-                    cam_key = cam["camera_id"]
-                    restart_events[cam_key] = Event()
-                    last_frame_time[cam_key] = time.time()
-
-                # Start watchdog only if not already running
-                if watchdog_thread_obj is None:
-                    watchdog_thread_obj = Thread(target=watchdog_thread, daemon=True)
-                    watchdog_thread_obj.start()
-
-                # Start camera threads
-                for cam in RTSP_CAMERAS:
-                    t = Thread(target=run_camera, args=(cam,), daemon=True, name=cam["camera_id"])
-                    t.start()
-                    active_threads.append(t)
-                    logger.info(f"  🎬 → {cam['camera_id']} ({cam['site_name']}) | mode={cam['zone_mode']}")
+                active_threads = _start_camera_threads()
 
             elif not in_business and active_threads:
                 # Business hours ENDED — stop threads and unload model
                 logger.warning(f"⏸️  BUSINESS HOURS ENDED ({now.strftime('%H:%M:%S IST')})")
-                logger.info(f"🛑 Stopping {len(active_threads)} camera thread(s)...")
-
-                # Signal all threads to stop
-                for cam in RTSP_CAMERAS:
-                    cam_key = cam["camera_id"]
-                    if cam_key in restart_events:
-                        restart_events[cam_key].set()
-
-                # Wait briefly for threads to exit gracefully
-                for t in active_threads:
-                    t.join(timeout=5)
-
+                _stop_camera_threads(active_threads)
                 active_threads = []
-                logger.info(f"✅ All threads stopped")
-                unload_model_from_gpu()
 
             elif not in_business and not active_threads:
                 # Still outside business hours — wait and check periodically
                 next_start = get_next_business_start()
                 if next_start:
-                    wait_min = round((next_start - now).total_seconds() / 60)
-                    if wait_min % 60 == 0:  # Log every hour
+                    wait_min = int((next_start - now).total_seconds() // 60)
+                    bucket = wait_min // 60  # log once per hour bucket
+                    if bucket != last_idle_log_min:
                         logger.info(f"⏳ Waiting for business hours ({wait_min} minutes remaining)")
-                time.sleep(30)  # Check every 30 seconds
+                        last_idle_log_min = bucket
+                time.sleep(30)
                 continue
 
-            # While in business hours, keep the main loop alive
+            # In business hours: reset idle tracker, also reap dead threads.
+            last_idle_log_min = None
+            # Detect a thread that exited unexpectedly (e.g. RTSP died and outer
+            # loop honored stop, or fatal crash). Restart it without reloading
+            # the model.
+            for i, t in enumerate(list(active_threads)):
+                if not t.is_alive():
+                    cam = next((c for c in RTSP_CAMERAS if c["camera_id"] == t.name), None)
+                    if cam is None:
+                        active_threads.remove(t)
+                        continue
+                    cam_key = cam["camera_id"]
+                    logger.warning(f"♻️  Thread {cam_key} not alive — respawning")
+                    stop_events[cam_key] = Event()
+                    restart_events[cam_key] = Event()
+                    last_frame_time[cam_key] = time.time()
+                    nt = Thread(target=run_camera, args=(cam,), daemon=True, name=cam_key)
+                    nt.start()
+                    active_threads[i] = nt
+
             time.sleep(5)
 
     except KeyboardInterrupt:
         logger.info("🛑 Keyboard interrupt, shutting down...")
-        for cam in RTSP_CAMERAS:
-            cam_key = cam["camera_id"]
-            if cam_key in restart_events:
-                restart_events[cam_key].set()
-        for t in active_threads:
-            t.join(timeout=5)
+        if active_threads:
+            _stop_camera_threads(active_threads)
         logger.info("✅ Shutdown complete")
  
