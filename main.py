@@ -36,6 +36,7 @@ from config import (
     ENTRY_MARGIN, ENTRY_DEBOUNCE_FRAMES, RECT2_CONFIRM_FRAMES, SESSION_MAX_SEC,
     GREET_HIT_THRESHOLD, GREET_GAP_TOLERANCE, RECT2_ABSENCE_ABORT_SEC, COOLDOWN_SEC,
     CONF_THRESHOLD, GREEN_STAFF_LABELS, CUSTOMER_LABEL,
+    CUSTOMER_CONF_THRESHOLD, STAFF_CONF_THRESHOLD,
     MAX_FPS, FRAME_INTERVAL, MIN_W, MIN_H,
     PANEL_W, PREVIEW_WINDOW_W, PREVIEW_WINDOW_H,
     OUTPUT_BASE_DIR, LOG_DIR, LOG_FILE, LOG_BACKUP_COUNT,
@@ -403,11 +404,14 @@ def run_camera(cfg):
                 if results.boxes is not None:
                     boxes = results.boxes.xyxy.cpu().numpy().astype(int)
                     clss  = results.boxes.cls.cpu().numpy().astype(int)
-                    for b, c in zip(boxes, clss):
+                    confs = results.boxes.conf.cpu().numpy()
+                    for b, c, conf in zip(boxes, clss, confs):
                         if c in staff_cls_ids:
-                            green_staff.append(b)
+                            if conf >= STAFF_CONF_THRESHOLD:
+                                green_staff.append(b)
                         elif c in customer_cls_ids:
-                            if (b[2]-b[0]) >= MIN_W and (b[3]-b[1]) >= MIN_H:
+                            if (conf >= CUSTOMER_CONF_THRESHOLD and
+                                    (b[2]-b[0]) >= MIN_W and (b[3]-b[1]) >= MIN_H):
                                 customers.append(b)
  
                 state["customer_count"] = len(customers)

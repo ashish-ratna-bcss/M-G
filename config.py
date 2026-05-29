@@ -311,6 +311,13 @@ CONF_THRESHOLD = 0.30
 MIN_W, MIN_H = 40, 100
 CUSTOMER_LABEL = "customers"
 GREEN_STAFF_LABELS = {"sec1", "sec2", "sec3"}
+# Per-label confidence thresholds to reduce misclassification
+# Detections classified as `CUSTOMER_LABEL` must meet this confidence
+# to be considered a customer in downstream logic.
+CUSTOMER_CONF_THRESHOLD = 0.45
+# Per-label threshold for staff detections — require this confidence
+# before treating a detection as staff in downstream logic.
+STAFF_CONF_THRESHOLD = 0.60
 
 # ===================== MODEL =====================
 MODEL_PATH = _resolve_model_path()
