@@ -285,6 +285,21 @@ RTSP_CAMERAS = [
     },
 ]
 
+# Ensure all RTSP URLs include recommended FFmpeg/OpenCV capture options
+# Append the query string if it's not already present to keep flags consistent.
+RTSP_SUFFIX = "rtsp_transport=tcp&fflags=discardcorrupt&flags=low_delay&fflags=nobuffer"
+for cam in RTSP_CAMERAS:
+    url = cam.get("rtsp_url")
+    if not url:
+        continue
+    # If the suffix already appears anywhere, skip
+    if RTSP_SUFFIX in url:
+        continue
+    if "?" in url:
+        cam["rtsp_url"] = url + "&" + RTSP_SUFFIX
+    else:
+        cam["rtsp_url"] = url + "?" + RTSP_SUFFIX
+
 # ===================== BUSINESS HOURS & TIMEZONE =====================
 IST = ZoneInfo("Asia/Kolkata")
 BUSINESS_START = dtime(10, 0)  # 10:00 AM
