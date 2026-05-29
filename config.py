@@ -100,6 +100,104 @@ RTSP_CAMERAS = [
         "entry_zone_1_ratios": [[0.2461, 0.6806], [0.2977, 0.762], [0.1542, 0.9287], [0.1268, 0.8019]],
         "entry_zone_2_ratios": [[0.1055, 0.9806], [0.5185, 0.5569], [0.7508, 0.7532], [0.4081, 0.9944]],
     },
+
+    # index: 5
+    # ── CHANDANAGAR — polygon zones
+    {
+        "rtsp_url": "rtsp://Bluecloud:User%401964@183.82.100.131:8001/Streaming/Channels/501",
+        "camera_id": "GF-11-CAM-5",
+        "site_id": "11",
+        "site_name": "chandanagar",
+        "zone_mode": "poly",
+        "entry_zone_1_ratios": [[0.5493119266, 0.3590535973], [0.5447247706, 0.4503138580], [0.6628440367, 0.4847899565], [0.6628440367, 0.3996137132]],
+        "entry_zone_2_ratios": [[0.6330275229, 0.9897633993], [0.1387614679, 0.9857073877], [0.4128440367, 0.5294060840], [0.6628440367, 0.6531144375]],
+    },
+
+    # index: 6
+    # ── HIMAYATHNAGAR — polygon zones
+    {
+        "rtsp_url": "rtsp://Bluecloud:User%401964@183.82.97.83:8001/Streaming/Channels/201",
+        "camera_id": "GF-6-CAM-2",
+        "site_id": "6",
+        "site_name": "himayathnagar",
+        "zone_mode": "poly",
+        "entry_zone_1_ratios": [[0.1961009174, 0.5621814475], [0.2316513761, 0.6743119266], [0.3405963303, 0.5805300714], [0.2866972477, 0.4969418960]],
+        "entry_zone_2_ratios": [[0.1158256881, 0.1034658512], [0.9988532110, 0.0647298675], [0.9919724771, 0.6539245668], [0.1272935780, 0.9006116208]],
+    },
+
+    # index: 7
+    # ── KARMINAGAR — polygon zones
+    {
+        "rtsp_url": "rtsp://Bluecloud:User%401964@45.117.66.58:8001/Streaming/Channel/801",
+        "camera_id": "GF-21-CAM-8",
+        "site_id": "21",
+        "site_name": "karminagar",
+        "zone_mode": "poly",
+        "entry_zone_1_ratios": [[0.2958715596, 0.5334620956], [0.3061926606, 0.8437469821], [0.3956422018, 0.8356349590], [0.3807339450, 0.5192660550]],
+        "entry_zone_2_ratios": [[0.5057339450, 0.0183486239], [0.9701834862, 0.0366006760], [0.9587155963, 0.9106711733], [0.4655963303, 0.9066151618]],
+    },
+
+    # index: 8
+    # ── KHAMMAM — polygon zones
+    {
+        "rtsp_url": "rtsp://Bluecloud:User%401964@175.101.113.18:8001/Streaming/Channels/401",
+        "camera_id": "GF-30-CAM-4",
+        "site_id": "30",
+        "site_name": "khammam",
+        "zone_mode": "poly",
+        "entry_zone_1_ratios": [[0.4793577982, 0.2461773700], [0.6192660550, 0.2563710499], [0.6181192661, 0.3154943935], [0.4782110092, 0.3053007136]],
+        "entry_zone_2_ratios": [[0.3704128440, 0.0015290520], [0.1181192661, 0.7660550459], [0.8405963303, 0.8190621814], [0.7133027523, 0.0035677880]],
+    },
+
+    # index: 9
+    # ── KOKAPET — polygon zones
+    {
+        "rtsp_url": "rtsp://Bluecloud:User%401964@183.82.112.217:8001/Streaming/Channels/601",
+        "camera_id": "GF-12-CAM-6",
+        "site_id": "12",
+        "site_name": "kokapet",
+        "zone_mode": "poly",
+        "entry_zone_1_ratios": [[0.0045871560, 0.5517141478], [0.0011467890, 0.7200386287], [0.0814220183, 0.9958474167], [0.1525229358, 0.9938194109]],
+        "entry_zone_2_ratios": [[0.2694954128, 0.0163206181], [0.7694954128, 0.0082085949], [0.7812655010, 0.8003472222], [0.2878440367, 0.8011588605], [0.2167431193, 0.3793336552]],
+    },
+
+    # index: 10
+    # ── KOMPALLY — polygon zones
+    {
+        "rtsp_url": "rtsp://Bluecloud:User%401964@183.82.106.41:8001/Streaming/Channels/401",
+        "camera_id": "GF-10-CAM-4",
+        "site_id": "10",
+        "site_name": "kompally",
+        "zone_mode": "poly",
+        "entry_zone_1_ratios": [[0.1548165138, 0.6409464027], [0.2029816514, 0.8478029937], [0.2591743119, 0.8031868662], [0.2155963303, 0.5841622405]],
+        "entry_zone_2_ratios": [[0.1662844037, 0.2475132786], [0.5665137615, 0.0568807339], [0.8126094571, 0.4365102774], [0.2889908257, 0.9045871560]],
+    },
+
+    # Miryalaguda zones were provided, but the RTSP URL was not included in the attachment.
+
+    # index: 11
+    # ── NIZAMBAD — polygon zones
+    {
+        "rtsp_url": "rtsp://Bluecloud:User%401964@43.249.216.149:8001/Streaming/Channels/401",
+        "camera_id": "GF-31-CAM-4",
+        "site_id": "31",
+        "site_name": "nizambad",
+        "zone_mode": "poly",
+        "entry_zone_1_ratios": [[0.7259174312, 0.3976287012], [0.7568807339, 0.5200035871], [0.8107798165, 0.5035300448], [0.7763761468, 0.3835085221]],
+        "entry_zone_2_ratios": [[0.5779816514, 0.0587444019], [0.9724770642, 0.1058116657], [0.9759174312, 0.9247820557], [0.5470183486, 0.9271354189]],
+    },
+
+    # index: 12
+    # ── WARANGAL — polygon zones
+    {
+        "rtsp_url": "rtsp://Bluecloud:User%401964@103.89.55.147:8001/Streaming/Channels/701",
+        "camera_id": "GF-15-CAM-7",
+        "site_id": "15",
+        "site_name": "warangal",
+        "zone_mode": "poly",
+        "entry_zone_1_ratios": [[0.6606501795, 0.2160616939], [0.6582568807, 0.2726809378], [0.7121559633, 0.2747196738], [0.7137075013, 0.2215626312]],
+        "entry_zone_2_ratios": [[0.2809633028, 0.0891946993], [0.2293577982, 0.6620795107], [0.8715596330, 0.6478083588], [0.7236238532, 0.0728848114]],
+    },
 ]
 
 # ===================== BUSINESS HOURS & TIMEZONE =====================
