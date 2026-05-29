@@ -329,10 +329,8 @@ GREEN_STAFF_LABELS = {"sec1", "sec2", "sec3"}
 # Per-label confidence thresholds to reduce misclassification
 # Detections classified as `CUSTOMER_LABEL` must meet this confidence
 # to be considered a customer in downstream logic.
-CUSTOMER_CONF_THRESHOLD = 0.45
-# Per-label threshold for staff detections — require this confidence
-# before treating a detection as staff in downstream logic.
-STAFF_CONF_THRESHOLD = 0.60
+# Per-label thresholds removed — using the single global `CONF_THRESHOLD`
+# for both customer and staff detections to keep behavior consistent.
 
 # ===================== MODEL =====================
 MODEL_PATH = _resolve_model_path()

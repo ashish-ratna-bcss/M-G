@@ -412,10 +412,10 @@ def run_camera(cfg):
                     confs = results.boxes.conf.cpu().numpy()
                     for b, c, conf in zip(boxes, clss, confs):
                         if c in staff_cls_ids:
-                            if conf >= STAFF_CONF_THRESHOLD:
+                            if conf >= CONF_THRESHOLD:
                                 green_staff.append(b)
                         elif c in customer_cls_ids:
-                            if (conf >= CUSTOMER_CONF_THRESHOLD and
+                            if (conf >= CONF_THRESHOLD and
                                     (b[2]-b[0]) >= MIN_W and (b[3]-b[1]) >= MIN_H):
                                 customers.append(b)
  

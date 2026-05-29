@@ -68,19 +68,13 @@ def analyze(log_path):
         return
 
     print(f"Analyzed log: {log_path}\n")
+    print("Reporting MINIMUM session->greet time per camera (useful for conservative timer tuning):\n")
     for cam, ds in sorted(durations.items(), key=lambda x: -len(x[1])):
         cnt = len(ds)
-        mean = statistics.mean(ds)
-        med = statistics.median(ds)
         mn = min(ds)
-        mx = max(ds)
-        p90 = statistics.quantiles(ds, n=10)[8] if cnt >= 10 else max(ds)
-        suggested_session_max = max(int(round(p90 * 2)), int(mx) + 5)
         print(f"Camera: {cam}")
         print(f"  Samples: {cnt}")
-        print(f"  Mean: {mean:.2f}s, Median: {med:.2f}s, Min: {mn:.2f}s, Max: {mx:.2f}s")
-        print(f"  90th pct (approx): {p90:.2f}s")
-        print(f"  Suggested SESSION_MAX_SEC (heuristic): {suggested_session_max}s\n")
+        print(f"  Min: {mn:.2f}s\n")
 
 
 if __name__ == '__main__':
@@ -90,4 +84,3 @@ if __name__ == '__main__':
     except FileNotFoundError:
         print(f"Log file not found: {path}")
         sys.exit(2)
-*** End Patch
