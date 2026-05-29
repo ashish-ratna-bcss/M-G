@@ -40,6 +40,9 @@ from config import (
     MAX_FPS, FRAME_INTERVAL, MIN_W, MIN_H,
     PANEL_W, PREVIEW_WINDOW_W, PREVIEW_WINDOW_H,
     OUTPUT_BASE_DIR, LOG_DIR, LOG_FILE, LOG_BACKUP_COUNT,
+    # time-based options
+    USE_TIME_BASED_ENTRY, ENTRY_DEBOUNCE_SEC,
+    USE_TIME_BASED_RECT2, RECT2_CONFIRM_SEC,
 )
 import torch
 import argparse
@@ -308,6 +311,8 @@ def run_camera(cfg):
         "rect2_last_seen_time": None,
         "cooldown_until":       0,
         "entry_candidate_hits": 0,
+        "entry_candidate_start_time": None,
+        "rect2_confirm_start_time": None,
         "customer_count":       0,
         "staff_count":          0,
     }
@@ -422,19 +427,34 @@ def run_camera(cfg):
                 cust_in_entry = customer_foot_in_zone(customers, zones["zone1_px"], mode)
  
                 if cust_in_entry and state["session"] is None:
-                    state["entry_candidate_hits"] += 1
-                    if state["entry_candidate_hits"] >= ENTRY_DEBOUNCE_FRAMES:
-                        state["session"] = {
-                            "start":          now,
-                            "greet_hits":     0,
-                            "last_greet_hit": None,
-                            "done":           False
-                        }
-                        state["entry_candidate_hits"] = 0
-                        logger.info(f"👤 SESSION STARTED → {cam_key}")
+                    if USE_TIME_BASED_ENTRY:
+                        if state["entry_candidate_start_time"] is None:
+                            state["entry_candidate_start_time"] = now
+                        elif now - state["entry_candidate_start_time"] >= ENTRY_DEBOUNCE_SEC:
+                            state["session"] = {
+                                "start":          now,
+                                "greet_hits":     0,
+                                "last_greet_hit": None,
+                                "done":           False
+                            }
+                            state["entry_candidate_hits"] = 0
+                            state["entry_candidate_start_time"] = None
+                            logger.info(f"👤 SESSION STARTED → {cam_key}")
+                    else:
+                        state["entry_candidate_hits"] += 1
+                        if state["entry_candidate_hits"] >= ENTRY_DEBOUNCE_FRAMES:
+                            state["session"] = {
+                                "start":          now,
+                                "greet_hits":     0,
+                                "last_greet_hit": None,
+                                "done":           False
+                            }
+                            state["entry_candidate_hits"] = 0
+                            logger.info(f"👤 SESSION STARTED → {cam_key}")
                 else:
                     if state["session"] is None:
                         state["entry_candidate_hits"] = 0
+                        state["entry_candidate_start_time"] = None
  
                 # ── GREET ZONE (zone2) — rect-2 confirmation ──────────────────
                 # Same logic as rect-2 in somajiguda:
@@ -442,17 +462,28 @@ def run_camera(cfg):
                 if state["session"] and not state["rect2_confirmed"]:
                     cust_in_greet  = customer_foot_in_zone(customers,   zones["zone2_px"], mode)
                     staff_in_greet = staff_intersects_zone(green_staff, zones["zone2_px"], mode)
- 
+
                     if cust_in_greet and staff_in_greet:
-                        state["rect2_hits"] += 1
-                        state["rect2_last_seen_time"] = now
+                        if USE_TIME_BASED_RECT2:
+                            if state["rect2_confirm_start_time"] is None:
+                                state["rect2_confirm_start_time"] = now
+                            elif now - state["rect2_confirm_start_time"] >= RECT2_CONFIRM_SEC:
+                                state["rect2_confirmed"]      = True
+                                state["rect2_last_seen_time"] = now
+                                state["rect2_confirm_start_time"] = None
+                                logger.info(f"✅ GREET ZONE CONFIRMED → {cam_key}")
+                            else:
+                                state["rect2_last_seen_time"] = now
+                        else:
+                            state["rect2_hits"] += 1
+                            state["rect2_last_seen_time"] = now
+                            if state["rect2_hits"] >= RECT2_CONFIRM_FRAMES:
+                                state["rect2_confirmed"]      = True
+                                state["rect2_last_seen_time"] = now
+                                logger.info(f"✅ GREET ZONE CONFIRMED → {cam_key}")
                     else:
                         state["rect2_hits"] = 0
- 
-                    if state["rect2_hits"] >= RECT2_CONFIRM_FRAMES:
-                        state["rect2_confirmed"]      = True
-                        state["rect2_last_seen_time"] = now
-                        logger.info(f"✅ GREET ZONE CONFIRMED → {cam_key}")
+                        state["rect2_confirm_start_time"] = None
  
                 # ── ABSENCE ABORT ─────────────────────────────────────────────
                 if (state["session"] and state["rect2_confirmed"] and

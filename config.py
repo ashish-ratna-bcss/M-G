@@ -294,9 +294,24 @@ BUSINESS_END = dtime(21, 0)    # 09:00 PM
 ENTRY_MARGIN = 5
 ENTRY_DEBOUNCE_FRAMES = 2
 
+# Time-based entry confirmation (alternative to frame-count debouncing)
+# If `USE_TIME_BASED_ENTRY` is True, the system will require the customer
+# to remain in the entry zone for at least `ENTRY_DEBOUNCE_SEC` seconds
+# before starting a session. This avoids relying purely on frame counts
+# and can be more robust on low-framerate or lossy streams.
+USE_TIME_BASED_ENTRY = True
+ENTRY_DEBOUNCE_SEC = 0.5
+
 # ===================== GREET ZONE (Zone-2) Confirmation Parameters =====================
 RECT2_CONFIRM_FRAMES = 2
 RECT2_ABSENCE_ABORT_SEC = 20
+
+# Time-based greet-zone confirmation (alternative to frame-count debouncing)
+# If `USE_TIME_BASED_RECT2` is True, the system will require the customer
+# + staff to both be present inside the greet zone for at least
+# `RECT2_CONFIRM_SEC` seconds before marking the greet zone as confirmed.
+USE_TIME_BASED_RECT2 = True
+RECT2_CONFIRM_SEC = 0.5
 
 # ===================== GREET HIT COUNTING Parameters =====================
 GREET_HIT_THRESHOLD = 4
