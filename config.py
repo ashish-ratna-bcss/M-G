@@ -31,6 +31,8 @@ def _resolve_model_path() -> str:
 
 # ===================== CAMERA CONFIGURATIONS =====================
 RTSP_CAMERAS = [
+
+    #Telangana Cameras Below
     # index: 0
     # ── SOMAJIGUDA — rectangle zones (ratios → rect)
     {
@@ -66,30 +68,6 @@ RTSP_CAMERAS = [
     },
 
     # index: 2
-    # ── VIZAG — polygon zones
-    {
-        "rtsp_url": "rtsp://Bluecloud:User%401964@106.51.52.103:8002/Streaming/Channels/401?rtsp_transport=tcp&fflags=discardcorrupt&flags=low_delay&fflags=nobuffer",
-        "camera_id": "FF-3-CAM-4",
-        "site_id": "3",
-        "site_name": "vizag",
-        "zone_mode": "poly",
-        "entry_zone_1_ratios": [[0.6552, 0.2097], [0.6211, 0.2463], [0.6982, 0.3574], [0.7305, 0.3019]],
-        "entry_zone_2_ratios": [[0.576, 0.2861], [0.3758, 0.4981], [0.7401, 0.906], [0.9109, 0.5537]],
-    },
-
-    # index: 3
-    # ── VIJAYAWADA — polygon zones
-    {
-        "rtsp_url": "rtsp://Bluecloud:User%401964@175.101.76.17:8001/Streaming/Channels/401?rtsp_transport=tcp&fflags=discardcorrupt&flags=low_delay&fflags=nobuffer",
-        "camera_id": "GF-4-CAM-4",
-        "site_id": "4",
-        "site_name": "vijayawada",
-        "zone_mode": "poly",
-        "entry_zone_1_ratios": [[0.7031, 0.3227], [0.6669, 0.3782], [0.8427, 0.5], [0.8573, 0.4287]],
-        "entry_zone_2_ratios": [[0.5867, 0.3833], [0.3289, 0.6958], [0.7557, 0.9861], [0.8672, 0.538]],
-    },
-
-    # index: 4
     # ── JAYANAGAR — polygon zones
     {
         "rtsp_url": "rtsp://Bluecloud:User%401964@106.51.37.109:8001/Streaming/Channels/401?rtsp_transport=tcp&fflags=discardcorrupt&flags=low_delay&fflags=nobuffer",
@@ -101,7 +79,7 @@ RTSP_CAMERAS = [
         "entry_zone_2_ratios": [[0.1055, 0.9806], [0.5185, 0.5569], [0.7508, 0.7532], [0.4081, 0.9944]],
     },
 
-    # index: 5
+    # index: 3
     # ── CHANDANAGAR — polygon zones
     {
         "rtsp_url": "rtsp://Bluecloud:User%401964@183.82.100.131:8001/Streaming/Channels/501",
@@ -113,7 +91,7 @@ RTSP_CAMERAS = [
         "entry_zone_2_ratios": [[0.6330275229, 0.9897633993], [0.1387614679, 0.9857073877], [0.4128440367, 0.5294060840], [0.6628440367, 0.6531144375]],
     },
 
-    # index: 6
+    # index: 4
     # ── HIMAYATHNAGAR — polygon zones
     {
         "rtsp_url": "rtsp://Bluecloud:User%401964@183.82.97.83:8001/Streaming/Channels/201",
@@ -125,7 +103,7 @@ RTSP_CAMERAS = [
         "entry_zone_2_ratios": [[0.1158256881, 0.1034658512], [0.9988532110, 0.0647298675], [0.9919724771, 0.6539245668], [0.1272935780, 0.9006116208]],
     },
 
-    # index: 7
+    # index: 5
     # ── KARMINAGAR — polygon zones
     {
         "rtsp_url": "rtsp://Bluecloud:User%401964@45.117.66.58:8001/Streaming/Channel/801",
@@ -137,7 +115,7 @@ RTSP_CAMERAS = [
         "entry_zone_2_ratios": [[0.5057339450, 0.0183486239], [0.9701834862, 0.0366006760], [0.9587155963, 0.9106711733], [0.4655963303, 0.9066151618]],
     },
 
-    # index: 8
+    # index: 6
     # ── KHAMMAM — polygon zones
     {
         "rtsp_url": "rtsp://Bluecloud:User%401964@175.101.113.18:8001/Streaming/Channels/401",
@@ -149,7 +127,7 @@ RTSP_CAMERAS = [
         "entry_zone_2_ratios": [[0.3704128440, 0.0015290520], [0.1181192661, 0.7660550459], [0.8405963303, 0.8190621814], [0.7133027523, 0.0035677880]],
     },
 
-    # index: 9
+    # index: 7
     # ── KOKAPET — polygon zones
     {
         "rtsp_url": "rtsp://Bluecloud:User%401964@183.82.112.217:8001/Streaming/Channels/601",
@@ -161,7 +139,7 @@ RTSP_CAMERAS = [
         "entry_zone_2_ratios": [[0.2694954128, 0.0163206181], [0.7694954128, 0.0082085949], [0.7812655010, 0.8003472222], [0.2878440367, 0.8011588605], [0.2167431193, 0.3793336552]],
     },
 
-    # index: 10
+    # index: 8
     # ── KOMPALLY — polygon zones
     {
         "rtsp_url": "rtsp://Bluecloud:User%401964@183.82.106.41:8001/Streaming/Channels/401",
@@ -172,10 +150,18 @@ RTSP_CAMERAS = [
         "entry_zone_1_ratios": [[0.1548165138, 0.6409464027], [0.2029816514, 0.8478029937], [0.2591743119, 0.8031868662], [0.2155963303, 0.5841622405]],
         "entry_zone_2_ratios": [[0.1662844037, 0.2475132786], [0.5665137615, 0.0568807339], [0.8126094571, 0.4365102774], [0.2889908257, 0.9045871560]],
     },
-
-    # Miryalaguda zones were provided, but the RTSP URL was not included in the attachment.
-
-    # index: 11
+    # index: 9
+    # ── MIRYALAGUDA — polygon zones
+    {
+        "rtsp_url": "rtsp://Bluecloud:User%401964@154.210.236.163:8001/Streaming/Channel/3001",
+        "camera_id": "GF-18-CAM-30",
+        "site_id": "18",    
+        "site_name": "miryalaguda",
+        "zone_mode": "poly",
+        "entry_zone_1_ratios": [[0.6339754816, 0.6161397364], [0.7810858144, 0.6594985713], [0.7810858144, 0.6594985713], [0.7600700525, 0.7926721357], [0.6094570928, 0.7462162411]],
+        "entry_zone_2_ratios": [[0.8178633975, 0.1484837312], [0.7583187391, 1.0], [0.1541155867, 0.9908839524], [0.6147110333, 0.1391925523]],
+    },
+    # index: 10
     # ── NIZAMBAD — polygon zones
     {
         "rtsp_url": "rtsp://Bluecloud:User%401964@43.249.216.149:8001/Streaming/Channels/401",
@@ -187,7 +173,7 @@ RTSP_CAMERAS = [
         "entry_zone_2_ratios": [[0.5779816514, 0.0587444019], [0.9724770642, 0.1058116657], [0.9759174312, 0.9247820557], [0.5470183486, 0.9271354189]],
     },
 
-    # index: 12
+    # index: 11
     # ── WARANGAL — polygon zones
     {
         "rtsp_url": "rtsp://Bluecloud:User%401964@103.89.55.147:8001/Streaming/Channels/701",
@@ -197,6 +183,105 @@ RTSP_CAMERAS = [
         "zone_mode": "poly",
         "entry_zone_1_ratios": [[0.6606501795, 0.2160616939], [0.6582568807, 0.2726809378], [0.7121559633, 0.2747196738], [0.7137075013, 0.2215626312]],
         "entry_zone_2_ratios": [[0.2809633028, 0.0891946993], [0.2293577982, 0.6620795107], [0.8715596330, 0.6478083588], [0.7236238532, 0.0728848114]],
+    },
+
+
+    # Andhra Pradesh Cameras Below
+
+    # index: 12
+    # ── VIZAG — polygon zones
+    {
+        "rtsp_url": "rtsp://Bluecloud:User%401964@106.51.52.103:8002/Streaming/Channels/401?rtsp_transport=tcp&fflags=discardcorrupt&flags=low_delay&fflags=nobuffer",
+        "camera_id": "FF-3-CAM-4",
+        "site_id": "3",
+        "site_name": "vizag",
+        "zone_mode": "poly",
+        "entry_zone_1_ratios": [[0.6552, 0.2097], [0.6211, 0.2463], [0.6982, 0.3574], [0.7305, 0.3019]],
+        "entry_zone_2_ratios": [[0.576, 0.2861], [0.3758, 0.4981], [0.7401, 0.906], [0.9109, 0.5537]],
+    },
+
+    # index: 13
+    # ── VIJAYAWADA — polygon zones
+    {
+        "rtsp_url": "rtsp://Bluecloud:User%401964@175.101.76.17:8001/Streaming/Channels/401?rtsp_transport=tcp&fflags=discardcorrupt&flags=low_delay&fflags=nobuffer",
+        "camera_id": "GF-4-CAM-4",
+        "site_id": "4",
+        "site_name": "vijayawada",
+        "zone_mode": "poly",
+        "entry_zone_1_ratios": [[0.7031, 0.3227], [0.6669, 0.3782], [0.8427, 0.5], [0.8573, 0.4287]],
+        "entry_zone_2_ratios": [[0.5867, 0.3833], [0.3289, 0.6958], [0.7557, 0.9861], [0.8672, 0.538]],
+    },
+
+    # index: 14
+    # ── ANANTHAPUR — polygon zones
+    {
+        "rtsp_url": "rtsp://Bluecloud:User%401964@103.248.210.164:8001/Streaming/Channels/301",
+        "camera_id": "GF-26-CAM-3",
+        "site_id": "26",
+        "site_name": "ananthapur",
+        "zone_mode": "poly",
+        "entry_zone_1_ratios": [[0.5917431193, 0.4036697248], [0.5791284404, 0.5131820377], [0.7041284404, 0.5638821825], [0.7155963303, 0.4523418638]],
+        "entry_zone_2_ratios": [[0.3520642202, 0.4280057943], [0.7110091743, 0.5922742636], [0.4323394495, 1.0], [0.0722477064, 0.9877353935]],
+    },
+
+    # index: 15
+    # ── BHIMAVARAM — polygon zones
+    {
+        "rtsp_url": "rtsp://Bluecloud:User%401964@175.101.94.133:8001/Streaming/Channels/301",
+        "camera_id": "GF-25-CAM-3",
+        "site_id": "25",
+        "site_name": "bhimavaram",
+        "zone_mode": "poly",
+        "entry_zone_1_ratios": [[0.2626146789, 0.5922742636], [0.3291284404, 0.5537421535], [0.3314220183, 0.6024142926], [0.2683486239, 0.6450024143]],
+        "entry_zone_2_ratios": [[0.6594036697, 0.9836793819], [0.3291284404, 0.3002414293], [0.1456422018, 0.3773056494], [0.126146789, 0.9877353935]],
+    },
+
+    # index: 16
+    # ── ELURU — polygon zones
+    {
+        "rtsp_url": "rtsp://Bluecloud:User%401964@49.205.164.51:8001/Streaming/Channels/1201",
+        "camera_id": "GF-13-CAM-12",
+        "site_id": "13",
+        "site_name": "eluru",
+        "zone_mode": "poly",
+        "entry_zone_1_ratios": [[0.6685779817, 0.3752776437], [0.754587156, 0.4949299855], [0.7305045872, 0.5760502173], [0.6433486239, 0.4482858522]],
+        "entry_zone_2_ratios": [[0.7201834862, 0.1724770642], [0.8658256881, 0.332689522], [0.6525229358, 0.9796233704], [0.1158256881, 0.9857073877], [0.121559633, 0.1968131338]],
+    },
+
+    # index: 17
+    # ── GUNTUR — polygon zones
+    {
+        "rtsp_url": "rtsp://Bluecloud:User%401964@49.205.164.154:8001/Streaming/Channels/601",
+        "camera_id": "FF-19-CAM-6",
+        "site_id": "19",
+        "site_name": "guntur",
+        "zone_mode": "poly",
+        "entry_zone_1_ratios": [[0.7970183486, 0.5071355759], [0.7649082569, 0.5316004077], [0.8394495413, 0.6376146789], [0.8543577982, 0.5886850153]],
+        "entry_zone_2_ratios": [[0.751146789, 0.2359836901], [0.745412844, 0.9617737003], [0.3233944954, 0.9658511723], [0.3222477064, 0.2196738022]],
+    },
+
+    # index: 18
+    # ── KADAPA — polygon zones
+    {
+        "rtsp_url": "rtsp://Bluecloud:User%401964@103.171.190.6:8001/Streaming/Channels/301",
+        "camera_id": "GF-17-CAM-3",
+        "site_id": "17",
+        "site_name": "kadapa",
+        "zone_mode": "poly",
+        "entry_zone_1_ratios": [[0.0910683012, 0.7288382954], [0.1313485114, 0.9965946682], [0.3099824869, 0.9965946682], [0.238178634, 0.6105273399]],
+        "entry_zone_2_ratios": [[0.8178633975, 0.0096322242], [0.8178633975, 0.6665693715], [0.3852889667, 0.9903677758], [0.3082311734, 0.0127456704]],
+    },
+
+    # index: 19
+    # ── KAKINADA — polygon zones
+    {
+        "rtsp_url": "rtsp://Bluecloud:User%401964@175.101.145.50:8001/Streaming/Channels/301",
+        "camera_id": "GF-22-CAM-3",
+        "site_id": "22",
+        "site_name": "kakinada",
+        "zone_mode": "poly",
+        "entry_zone_1_ratios": [[0.8061926606, 0.3419979613], [0.7924311927, 0.4031600408], [0.8497706422, 0.4520897044], [0.8646788991, 0.378695209]],
+        "entry_zone_2_ratios": [[0.7110091743, 0.0790010194], [0.9002293578, 0.1890927625], [0.8027522936, 0.8251783894], [0.4506880734, 0.4520897044]],
     },
 ]
 
@@ -252,7 +337,7 @@ except Exception:
 
 # ===================== OUTPUT & LOGGING =====================
 # Use a repository-relative output directory by default
-OUTPUT_BASE_DIR = "outputs"
+OUTPUT_BASE_DIR = "meet_and_greet"
 LOG_DIR = "logs"
 LOG_FILE = "meet_greet_log.txt"
-LOG_BACKUP_COUNT = 7
+LOG_BACKUP_COUNT = 5
