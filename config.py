@@ -36,7 +36,7 @@ RTSP_CAMERAS = [
     # index: 0
     # ── SOMAJIGUDA — rectangle zones (ratios → rect)
     {
-        "rtsp_url": "rtsp://Bluecloud:User%401964@183.82.108.159:8001/Streaming/Channels/301?rtsp_transport=tcp",
+        "rtsp_url": "rtsp://Bluecloud:User%401964@183.82.108.159:8001/Streaming/Channels/301",
         "camera_id": "GF-1-CAM-3",
         "site_id": "1",
         "site_name": "somajiguda",
@@ -58,7 +58,7 @@ RTSP_CAMERAS = [
     # index: 1
     # ── JUBILEE HILLS — polygon zones
     {
-        "rtsp_url": "rtsp://Bluecloud:User%401964@183.82.121.130:8001/Streaming/Channels/301?rtsp_transport=tcp&fflags=discardcorrupt&flags=low_delay&fflags=nobuffer",
+        "rtsp_url": "rtsp://Bluecloud:User%401964@183.82.121.130:8001/Streaming/Channels/301",
         "camera_id": "GF-2-CAM-4",
         "site_id": "2",
         "site_name": "jubilee_hills",
@@ -70,7 +70,7 @@ RTSP_CAMERAS = [
     # index: 2
     # ── JAYANAGAR — polygon zones
     {
-        "rtsp_url": "rtsp://Bluecloud:User%401964@106.51.37.109:8001/Streaming/Channels/401?rtsp_transport=tcp&fflags=discardcorrupt&flags=low_delay&fflags=nobuffer",
+        "rtsp_url": "rtsp://Bluecloud:User%401964@106.51.37.109:8001/Streaming/Channels/401",
         "camera_id": "GF-5-CAM-4",
         "site_id": "5",
         "site_name": "jayanagar",
@@ -286,19 +286,46 @@ RTSP_CAMERAS = [
 ]
 
 # Ensure all RTSP URLs include recommended FFmpeg/OpenCV capture options
-# Append the query string if it's not already present to keep flags consistent.
-RTSP_SUFFIX = "rtsp_transport=tcp&fflags=discardcorrupt&flags=low_delay&fflags=nobuffer"
+# By default append a conservative set of options that improves stability:
+#   rtsp_transport=tcp          -> use TCP
+#   fflags=discardcorrupt+genpts -> drop corrupt frames + regenerate PTS
+#   flags=low_delay             -> reduce latency
+#   reorder_queue_size=0        -> avoid internal reorder buffering
+# Do NOT add `fflags=nobuffer` by default (can cause visible glitches on WAN).
+# If a URL already contains ffmpeg/rtsp flags (e.g. contains 'fflags=',
+# 'rtsp_transport=' or 'flags='), we assume it's intentionally configured
+# and we will NOT append the defaults.
+RTSP_SUFFIX = (
+    "rtsp_transport=tcp"
+    "&fflags=discardcorrupt+genpts"
+    "&flags=low_delay"
+    "&reorder_queue_size=0"
+)
+
 for cam in RTSP_CAMERAS:
     url = cam.get("rtsp_url")
     if not url:
         continue
-    # If the suffix already appears anywhere, skip
-    if RTSP_SUFFIX in url:
+
+    lower = url.lower()
+
+    if any(
+        k in lower
+        for k in (
+            "fflags=",
+            "rtsp_transport=",
+            "flags=",
+            "genpts",
+            "reorder_queue_size",
+        )
+    ):
         continue
-    if "?" in url:
-        cam["rtsp_url"] = url + "&" + RTSP_SUFFIX
-    else:
-        cam["rtsp_url"] = url + "?" + RTSP_SUFFIX
+
+    cam["rtsp_url"] = (
+        url + "&" + RTSP_SUFFIX
+        if "?" in url
+        else url + "?" + RTSP_SUFFIX
+    )
 
 # ===================== BUSINESS HOURS & TIMEZONE =====================
 IST = ZoneInfo("Asia/Kolkata")
