@@ -13,21 +13,17 @@ BASE_DIR = Path(__file__).resolve().parent
 
 
 def _resolve_model_path() -> str:
-    """Resolve the YOLO weights file from the workspace directory."""
-    candidate_names = (
-        "new_staff.pt",
-        "security_latest.pt",
-    )
+    """Resolve the YOLO weights file from the workspace directory.
 
-    for candidate_name in candidate_names:
-        candidate_path = BASE_DIR / candidate_name
-        if candidate_path.exists():
-            return str(candidate_path)
-
-    raise FileNotFoundError(
-        "No model weights file found. Expected one of: "
-        + ", ".join(candidate_names)
-    )
+    This project now uses a single canonical weights file named
+    `security_latest 2.pt`. Return its absolute path if present,
+    otherwise raise FileNotFoundError.
+    """
+    expected_name = "security_latest 2.pt"
+    expected_path = BASE_DIR / expected_name
+    if expected_path.exists():
+        return str(expected_path)
+    raise FileNotFoundError(f"No model weights file found. Expected: {expected_name}")
 
 # ===================== CAMERA CONFIGURATIONS =====================
 RTSP_CAMERAS = [
@@ -162,12 +158,12 @@ RTSP_CAMERAS = [
         "entry_zone_2_ratios": [[0.8178633975, 0.1484837312], [0.7583187391, 1.0], [0.1541155867, 0.9908839524], [0.6147110333, 0.1391925523]],
     },
     # index: 10
-    # ── NIZAMBAD — polygon zones
+    # ── NIZAMABAD — polygon zones
     {
         "rtsp_url": "rtsp://Bluecloud:User%401964@43.249.216.149:8001/Streaming/Channels/401",
         "camera_id": "GF-31-CAM-4",
         "site_id": "31",
-        "site_name": "nizambad",
+        "site_name": "nizamabad",
         "zone_mode": "poly",
         "entry_zone_1_ratios": [[0.7259174312, 0.3976287012], [0.7568807339, 0.5200035871], [0.8107798165, 0.5035300448], [0.7763761468, 0.3835085221]],
         "entry_zone_2_ratios": [[0.5779816514, 0.0587444019], [0.9724770642, 0.1058116657], [0.9759174312, 0.9247820557], [0.5470183486, 0.9271354189]],
