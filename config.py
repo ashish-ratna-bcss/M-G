@@ -353,7 +353,7 @@ RECT2_CONFIRM_SEC = 0.5
 
 # ===================== GREET HIT COUNTING Parameters =====================
 GREET_HIT_THRESHOLD = 4
-GREET_GAP_TOLERANCE = 0.5
+GREET_GAP_TOLERANCE = 5.0   # RC3 fix: was 0.5s — too short for multi-cam inference jitter
 SESSION_MAX_SEC = 40
 
 # ===================== COOLDOWN & RECOVERY =====================

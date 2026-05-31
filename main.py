@@ -429,6 +429,7 @@ def run_camera(cfg):
                     if USE_TIME_BASED_ENTRY:
                         if state["entry_candidate_start_time"] is None:
                             state["entry_candidate_start_time"] = now
+                            logger.info(f"🚶 Zone-1 triggered (debounce started) → {cam_key}")
                         elif now - state["entry_candidate_start_time"] >= ENTRY_DEBOUNCE_SEC:
                             state["session"] = {
                                 "start":          now,
@@ -440,6 +441,8 @@ def run_camera(cfg):
                             state["entry_candidate_start_time"] = None
                             logger.info(f"👤 SESSION STARTED → {cam_key}")
                     else:
+                        if state["entry_candidate_hits"] == 0:
+                            logger.info(f"🚶 Zone-1 triggered (frame debounce started) → {cam_key}")
                         state["entry_candidate_hits"] += 1
                         if state["entry_candidate_hits"] >= ENTRY_DEBOUNCE_FRAMES:
                             state["session"] = {
@@ -503,8 +506,11 @@ def run_camera(cfg):
                     staff_in_greet = staff_intersects_zone(green_staff, zones["zone2_px"], mode)
  
                     if cust_in_greet and staff_in_greet:
+                        # RC2 fix: keep absence-abort timer alive while actively counting hits
+                        state["rect2_last_seen_time"] = now
                         last_hit = state["session"]["last_greet_hit"]
                         if last_hit is not None and (now - last_hit) > GREET_GAP_TOLERANCE:
+                            # RC3 fix: GREET_GAP_TOLERANCE is now 5s (was 0.5s)
                             state["session"]["greet_hits"] = 1
                         else:
                             state["session"]["greet_hits"] += 1
@@ -513,7 +519,7 @@ def run_camera(cfg):
                         # ── Save snapshot when threshold reached ──────────────
                         if state["session"]["greet_hits"] >= GREET_HIT_THRESHOLD:
                             duration_sec = now - state["session"]["start"]
-                            if int(duration_sec) > 0:
+                            if duration_sec >= 2.0:  # min 2s greet duration for all stores
                                 dur_str = (f"{int(duration_sec)}sec"
                                            if duration_sec < 60
                                            else f"{round(duration_sec/60,2)}mins")
