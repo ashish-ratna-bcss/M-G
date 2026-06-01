@@ -279,6 +279,102 @@ RTSP_CAMERAS = [
         "entry_zone_1_ratios": [[0.8061926606, 0.3419979613], [0.7924311927, 0.4031600408], [0.8497706422, 0.4520897044], [0.8646788991, 0.378695209]],
         "entry_zone_2_ratios": [[0.7110091743, 0.0790010194], [0.9002293578, 0.1890927625], [0.8027522936, 0.8251783894], [0.4506880734, 0.4520897044]],
     },
+
+    # index: 20
+    # ── RAJAHMUNDRY — polygon zones
+    {
+        "rtsp_url": "rtsp://Bluecloud:User%401964@106.51.52.101:8001/Streaming/Channels/1501",
+        "camera_id": "GF-14-CAM-15",
+        "site_id": "14",
+        "site_name": "rajahmundry-store",
+        "zone_mode": "poly",
+        "entry_zone_1_ratios": [[0.6995412844, 0.5456301304], [0.6399082569, 0.5841622405], [0.7098623853, 0.6835345244], [0.7282110092, 0.5861902463]],
+        "entry_zone_2_ratios": [[0.6548165138, 0.1907291164], [0.7018348624, 0.9715113472], [0.0940366972, 0.9796233704], [0.1055045872, 0.1623370352]],
+    },
+
+    # index: 21
+    # ── KURNOOL — polygon zones
+    {
+        "rtsp_url": "rtsp://Bluecloud:User%401964@103.206.112.148:8001/Streaming/Channels/1801",
+        "camera_id": "GF-16-CAM-18",
+        "site_id": "16",
+        "site_name": "kurnool-store",
+        "zone_mode": "poly",
+        "entry_zone_1_ratios": [[0.4334862385, 0.3184934814], [0.5183486239, 0.322549493], [0.5206422018, 0.401641719], [0.3635321101, 0.3996137132]],
+        "entry_zone_2_ratios": [[0.0447247706, 0.1440849831], [0.0229357798, 0.9410912603], [0.7706422018, 0.9370352487], [0.6983944954, 0.1582810237]],
+    },
+
+    # index: 22
+    # ── SRIKAKULAM — polygon zones
+    {
+        "rtsp_url": "rtsp://Bluecloud:User%401964@175.101.130.104:8001/Streaming/Channels/2701",
+        "camera_id": "GF-20-CAM-27",
+        "site_id": "20",
+        "site_name": "srikakulam-store",
+        "zone_mode": "poly",
+        "entry_zone_1_ratios": [[0.8841743119, 0.7089704383], [0.8245412844, 0.9006116208], [0.7087155963, 0.9108053007], [0.748853211, 0.7130479103]],
+        "entry_zone_2_ratios": [[0.7293577982, 0.2849133537], [0.5435779817, 0.9638124363], [0.127293578, 0.378695209], [0.3016055046, 0.1156982671]],
+    },
+
+    # index: 23
+    # ── TIRUPATHI — polygon zones
+    {
+        "rtsp_url": "rtsp://Bluecloud:User%401964@202.83.31.24:8001/Streaming/Channels/2101",
+        "camera_id": "GF-23-CAM-21",
+        "site_id": "23",
+        "site_name": "tirupathi-store",
+        "zone_mode": "poly",
+        "entry_zone_1_ratios": [[0.6112084063, 0.3240902899], [0.5936952715, 0.436174353], [0.6935201401, 0.4392877992], [0.6847635727, 0.3240902899]],
+        "entry_zone_2_ratios": [[0.4973730298, 0.0843549329], [0.9439579685, 0.1154893948], [0.9562171629, 0.9841408834], [0.2574430823, 0.9685736525]],
+    },
+
+    # index: 24
+    # ── ONGOLE — polygon zones
+    {
+        "rtsp_url": "rtsp://Bluecloud:User%401964@175.101.81.163:8001/Streaming/Channels/501",
+        "camera_id": "GF-27-CAM-5",
+        "site_id": "27",
+        "site_name": "ongole-store",
+        "zone_mode": "poly",
+        "entry_zone_1_ratios": [[0.4724770642, 0.9917914051], [0.622706422, 0.7281506519], [0.7224770642, 0.8194109126], [0.6410550459, 0.9938194109]],
+        "entry_zone_2_ratios": [[0.0504587156, 0.2089811685], [0.247706422, 0.82549493], [0.501146789, 0.5354901014], [0.1880733945, 0.0873008209]],
+    },
+
+    # index: 25
+    # ── VIZIANAGARAM — polygon zones
+    {
+        "rtsp_url": "rtsp://Bluecloud:User%401964@106.51.52.2:8001/Streaming/Channels/1301",
+        "camera_id": "GF-29-CAM-13",
+        "site_id": "29",
+        "site_name": "vizianagaram-store",
+        "zone_mode": "poly",
+        "entry_zone_1_ratios": [[0.1123853211, 0.7293577982], [0.1943957968, 0.9561198677], [0.2907180385, 0.8440358046], [0.1926444834, 0.6260945709]],
+        "entry_zone_2_ratios": [[0.1085814361, 0.292955828], [0.3730297723, 0.8782837128], [0.6742556918, 0.1933255497], [0.4570928196, 0.0594473633]],
+    },
+
+    # index: 26
+    # ── ANAKAPALLI — polygon zones
+    {
+        "rtsp_url": "rtsp://Bluecloud:User%401964@175.101.133.45:8001/Streaming/Channels/401",
+        "camera_id": "GF-28-CAM-4",
+        "site_id": "28",
+        "site_name": "anakapalli-store",
+        "zone_mode": "poly",
+        "entry_zone_1_ratios": [[0.003440367, 0.5214171455], [0.002293578, 0.8049393567], [0.0894495413, 0.7600653376], [0.0791284404, 0.4989801359]],
+        "entry_zone_2_ratios": [[0.0802752294, 0.0808358676], [0.4243119266, 0.0461604892], [0.5745412844, 0.3460005256], [0.1536697248, 0.7988201723]],
+    },
+
+    # index: 27
+    # ── NELLORE — polygon zones
+    {
+        "rtsp_url": "rtsp://Bluecloud:User%401964@202.83.31.18:8001/Streaming/Channels/301",
+        "camera_id": "GF-24-CAM-3",
+        "site_id": "24",
+        "site_name": "nellore-store",
+        "zone_mode": "poly",
+        "entry_zone_1_ratios": [[0.1353211009, 0.745667686], [0.2006880734, 0.9780835882], [0.2786697248, 0.9169215087], [0.2075688073, 0.7069317023]],
+        "entry_zone_2_ratios": [[0.1720183486, 0.3175331295], [0.371559633, 0.8883792049], [0.7167431193, 0.3664627931], [0.5229357798, 0.1014271152]],
+    },
 ]
 
 # Ensure all RTSP URLs include recommended FFmpeg/OpenCV capture options
