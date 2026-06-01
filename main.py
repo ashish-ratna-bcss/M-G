@@ -34,7 +34,7 @@ from config import (
     RTSP_CAMERAS, IST, BUSINESS_START, BUSINESS_END, HEADLESS,
     DEVICE, MODEL_PATH,
     ENTRY_MARGIN, ENTRY_DEBOUNCE_FRAMES, RECT2_CONFIRM_FRAMES, SESSION_MAX_SEC,
-    GREET_HIT_THRESHOLD, GREET_GAP_TOLERANCE, RECT2_ABSENCE_ABORT_SEC, COOLDOWN_SEC,
+    GREET_GAP_TOLERANCE, RECT2_ABSENCE_ABORT_SEC, COOLDOWN_SEC, POST_SAVE_COOLDOWN_SEC,
     CONF_THRESHOLD, GREEN_STAFF_LABELS, CUSTOMER_LABEL,
     MAX_FPS, FRAME_INTERVAL, MIN_W, MIN_H,
     PANEL_W, PREVIEW_WINDOW_W, PREVIEW_WINDOW_H,
@@ -205,7 +205,7 @@ def draw_zones_on_preview(preview, zones, rect2_confirmed, mode):
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, g_color, 1, cv2.LINE_AA)
  
 # ===================== PREVIEW HUD =====================
-def draw_hud(frame, state, cfg, now):
+def draw_hud(frame, state, cfg, now_ts):
     h, w = frame.shape[:2]
     hud = np.zeros((h, PANEL_W, 3), dtype=np.uint8)
     hud[:] = (20, 20, 20)
@@ -238,10 +238,10 @@ def draw_hud(frame, state, cfg, now):
     session         = state.get("session")
     cooldown_until  = state.get("cooldown_until", 0)
     rect2_confirmed = state.get("rect2_confirmed", False)
-    in_cooldown     = now < cooldown_until
+    in_cooldown     = now_ts < cooldown_until if isinstance(cooldown_until, (int, float)) else False
  
     if in_cooldown:
-        txt(f"COOLDOWN  {cooldown_until - now:.0f}s", (0,130,255), scale=0.52, bold=True)
+        txt(f"COOLDOWN  {cooldown_until - now_ts:.0f}s", (0,130,255), scale=0.52, bold=True)
     elif session and not session.get("done"):
         txt("● SESSION ACTIVE", (0,220,80), scale=0.52, bold=True)
     else:
@@ -253,18 +253,21 @@ def draw_hud(frame, state, cfg, now):
         r2_color, scale=0.44)
     sep()
  
-    txt("GREET PROGRESS", (200,200,200), scale=0.46, bold=True)
-    greet_hits = session["greet_hits"] if session else 0
+    txt("COEXISTENCE DURATION", (200,200,200), scale=0.46, bold=True)
+    if session and session.get("coexistence_start_time"):
+        coexist_duration = now_ts - session["coexistence_start_time"]
+    else:
+        coexist_duration = 0.0
     bar_x1, bar_y = px, y
     bar_w, bar_h  = PANEL_W - px * 2, 18
-    filled = int(bar_w * min(greet_hits, GREET_HIT_THRESHOLD) / GREET_HIT_THRESHOLD)
+    filled = int(bar_w * min(coexist_duration, 2.0) / 2.0)  # 2s full bar
     cv2.rectangle(hud, (bar_x1, bar_y), (bar_x1+bar_w, bar_y+bar_h), (50,50,50), -1)
-    bar_color = (0,200,80) if greet_hits >= GREET_HIT_THRESHOLD else (0,130,255)
+    bar_color = (0,200,80) if coexist_duration >= 2.0 else (0,130,255)
     if filled > 0:
         cv2.rectangle(hud, (bar_x1, bar_y), (bar_x1+filled, bar_y+bar_h), bar_color, -1)
     cv2.rectangle(hud, (bar_x1, bar_y), (bar_x1+bar_w, bar_y+bar_h), (100,100,100), 1)
-    cv2.putText(hud, f"{greet_hits}/{GREET_HIT_THRESHOLD}",
-                (bar_x1+bar_w//2-18, bar_y+14), font, 0.42, (255,255,255), 1, cv2.LINE_AA)
+    cv2.putText(hud, f"{coexist_duration:.1f}/2.0s",
+                (bar_x1+bar_w//2-28, bar_y+14), font, 0.42, (255,255,255), 1, cv2.LINE_AA)
     y += bar_h + 8
     sep()
  
@@ -354,6 +357,9 @@ def run_camera(cfg):
                     continue
                 failed_reads = 0
                
+                # ── Capture frame timestamp BEFORE processing to decouple from inference latency ──
+                frame_timestamp = time.time()
+                
                 frame = cv2.resize(frame, (PREVIEW_WINDOW_W, PREVIEW_WINDOW_H))
  
                 # ── First frame: build zones from ratios ──────────────────────
@@ -377,14 +383,15 @@ def run_camera(cfg):
                     }
                     first_frame_logged = True
 
-                now = time.time()
-                if now - last_frame_time[cam_key] < FRAME_INTERVAL:
+                # Use frame_timestamp for all state machine decisions (not wall-clock now)
+                # This ensures KPI accuracy: events timestamped at frame capture, not post-inference
+                if frame_timestamp - last_frame_time[cam_key] < FRAME_INTERVAL:
                     continue
-                last_frame_time[cam_key] = now
+                last_frame_time[cam_key] = frame_timestamp
  
                 # ── Session timeout ───────────────────────────────────────────
-                if state["session"] and now - state["session"]["start"] >= SESSION_MAX_SEC:
-                    logger.info(f"⏰ Session timed out → {cam_key}")
+                if state["session"] and frame_timestamp - state["session"]["start"] >= SESSION_MAX_SEC:
+                    logger.info(f"⏰ Session timed out @ {frame_timestamp} → {cam_key}")
                     state["session"]             = None
                     state["rect2_hits"]          = 0
                     state["rect2_confirmed"]      = False
@@ -426,62 +433,44 @@ def run_camera(cfg):
                 cust_in_entry = customer_foot_in_zone(customers, zones["zone1_px"], mode)
  
                 if cust_in_entry and state["session"] is None:
-                    if USE_TIME_BASED_ENTRY:
-                        if state["entry_candidate_start_time"] is None:
-                            state["entry_candidate_start_time"] = now
-                            logger.info(f"🚶 Zone-1 triggered (debounce started) → {cam_key}")
-                        elif now - state["entry_candidate_start_time"] >= ENTRY_DEBOUNCE_SEC:
-                            state["session"] = {
-                                "start":          now,
-                                "greet_hits":     0,
-                                "last_greet_hit": None,
-                                "done":           False
-                            }
-                            state["entry_candidate_hits"] = 0
-                            state["entry_candidate_start_time"] = None
-                            logger.info(f"👤 SESSION STARTED → {cam_key}")
-                    else:
-                        if state["entry_candidate_hits"] == 0:
-                            logger.info(f"🚶 Zone-1 triggered (frame debounce started) → {cam_key}")
-                        state["entry_candidate_hits"] += 1
-                        if state["entry_candidate_hits"] >= ENTRY_DEBOUNCE_FRAMES:
-                            state["session"] = {
-                                "start":          now,
-                                "greet_hits":     0,
-                                "last_greet_hit": None,
-                                "done":           False
-                            }
-                            state["entry_candidate_hits"] = 0
-                            logger.info(f"👤 SESSION STARTED → {cam_key}")
+                    # Instant trigger: no debounce, start session immediately upon detection
+                    state["session"] = {
+                        "start":                   frame_timestamp,
+                        "coexistence_start_time":  None,  # When customer + staff first together in zone 2
+                        "last_coexistence_time":   None,  # Last frame when both were together
+                        "done":                    False
+                    }
+                    state["entry_candidate_hits"] = 0
+                    state["entry_candidate_start_time"] = None
+                    logger.info(f"👤 SESSION STARTED (instant) → {cam_key}")
                 else:
                     if state["session"] is None:
                         state["entry_candidate_hits"] = 0
                         state["entry_candidate_start_time"] = None
  
                 # ── GREET ZONE (zone2) — rect-2 confirmation ──────────────────
-                # Same logic as rect-2 in somajiguda:
-                # customer foot + staff bbox both inside greet zone → confirm
+                # Both customer and staff: any part of bbox overlaps greet zone
                 if state["session"] and not state["rect2_confirmed"]:
-                    cust_in_greet  = customer_foot_in_zone(customers,   zones["zone2_px"], mode)
+                    cust_in_greet  = [c for c in customers if box_in_zone(c, zones["zone2_px"], mode)]
                     staff_in_greet = staff_intersects_zone(green_staff, zones["zone2_px"], mode)
 
                     if cust_in_greet and staff_in_greet:
                         if USE_TIME_BASED_RECT2:
                             if state["rect2_confirm_start_time"] is None:
-                                state["rect2_confirm_start_time"] = now
-                            elif now - state["rect2_confirm_start_time"] >= RECT2_CONFIRM_SEC:
+                                state["rect2_confirm_start_time"] = frame_timestamp
+                            elif frame_timestamp - state["rect2_confirm_start_time"] >= RECT2_CONFIRM_SEC:
                                 state["rect2_confirmed"]      = True
-                                state["rect2_last_seen_time"] = now
+                                state["rect2_last_seen_time"] = frame_timestamp
                                 state["rect2_confirm_start_time"] = None
                                 logger.info(f"✅ GREET ZONE CONFIRMED → {cam_key}")
                             else:
-                                state["rect2_last_seen_time"] = now
+                                state["rect2_last_seen_time"] = frame_timestamp
                         else:
                             state["rect2_hits"] += 1
-                            state["rect2_last_seen_time"] = now
+                            state["rect2_last_seen_time"] = frame_timestamp
                             if state["rect2_hits"] >= RECT2_CONFIRM_FRAMES:
                                 state["rect2_confirmed"]      = True
-                                state["rect2_last_seen_time"] = now
+                                state["rect2_last_seen_time"] = frame_timestamp
                                 logger.info(f"✅ GREET ZONE CONFIRMED → {cam_key}")
                     else:
                         state["rect2_hits"] = 0
@@ -490,7 +479,7 @@ def run_camera(cfg):
                 # ── ABSENCE ABORT ─────────────────────────────────────────────
                 if (state["session"] and state["rect2_confirmed"] and
                         state["rect2_last_seen_time"] and
-                        now - state["rect2_last_seen_time"] > RECT2_ABSENCE_ABORT_SEC):
+                        frame_timestamp - state["rect2_last_seen_time"] > RECT2_ABSENCE_ABORT_SEC):
                     logger.info(f"🚫 Greet zone absence abort → {cam_key}")
                     state["session"]             = None
                     state["rect2_confirmed"]      = False
@@ -500,29 +489,38 @@ def run_camera(cfg):
  
                 # ── MEET & GREET hit counting ─────────────────────────────────
                 if (state["session"] and state["rect2_confirmed"] and
-                        not state["session"]["done"] and now >= state["cooldown_until"]):
+                        not state["session"]["done"] and frame_timestamp >= state["cooldown_until"]):
  
-                    cust_in_greet  = customer_foot_in_zone(customers,   zones["zone2_px"], mode)
+                    cust_in_greet  = [c for c in customers if box_in_zone(c, zones["zone2_px"], mode)]
                     staff_in_greet = staff_intersects_zone(green_staff, zones["zone2_px"], mode)
  
                     if cust_in_greet and staff_in_greet:
-                        # RC2 fix: keep absence-abort timer alive while actively counting hits
-                        state["rect2_last_seen_time"] = now
-                        last_hit = state["session"]["last_greet_hit"]
-                        if last_hit is not None and (now - last_hit) > GREET_GAP_TOLERANCE:
-                            # RC3 fix: GREET_GAP_TOLERANCE is now 5s (was 0.5s)
-                            state["session"]["greet_hits"] = 1
+                        # Track coexistence time (when both are together in zone 2)
+                        state["rect2_last_seen_time"] = frame_timestamp
+                        
+                        # Initialize coexistence tracking on first co-presence
+                        if state["session"]["coexistence_start_time"] is None:
+                            state["session"]["coexistence_start_time"] = frame_timestamp
+                            state["session"]["last_coexistence_time"] = frame_timestamp
+                            logger.info(f"🤝 Customer + Staff coexistence started → {cam_key}")
                         else:
-                            state["session"]["greet_hits"] += 1
-                        state["session"]["last_greet_hit"] = now
- 
-                        # ── Save snapshot when threshold reached ──────────────
-                        if state["session"]["greet_hits"] >= GREET_HIT_THRESHOLD:
-                            duration_sec = now - state["session"]["start"]
-                            if duration_sec >= 2.0:  # min 2s greet duration for all stores
-                                dur_str = (f"{int(duration_sec)}sec"
-                                           if duration_sec < 60
-                                           else f"{round(duration_sec/60,2)}mins")
+                            # Check for gap since last time both were together
+                            gap_since_last = frame_timestamp - state["session"]["last_coexistence_time"]
+                            if gap_since_last > GREET_GAP_TOLERANCE:
+                                # Gap exceeded 5s, reset coexistence timer
+                                state["session"]["coexistence_start_time"] = frame_timestamp
+                                logger.info(f"⏸️ Coexistence gap reset ({gap_since_last:.1f}s > {GREET_GAP_TOLERANCE}s) → {cam_key}")
+                            
+                            # Update last coexistence timestamp
+                            state["session"]["last_coexistence_time"] = frame_timestamp
+                        
+                        coexistence_duration = frame_timestamp - state["session"]["coexistence_start_time"]
+
+                        # ── Save snapshot when 2+ seconds of coexistence ──────────────
+                        if coexistence_duration >= 2.0:
+                                dur_str = (f"{int(coexistence_duration)}sec"
+                                           if coexistence_duration < 60
+                                           else f"{round(coexistence_duration/60,2)}mins")
  
                                 snap = frame.copy()
                                 for b in cust_in_greet:
@@ -554,24 +552,28 @@ def run_camera(cfg):
                                 try:
                                     meta = {}
                                     entry_ts = state["session"]["start"]
-                                    greet_ts = now
+                                    coexist_start_ts = state["session"]["coexistence_start_time"]
+                                    greet_ts = frame_timestamp
                                     meta["event_type"] = "greet"
                                     meta["site_name"] = cfg.get("site_name")
                                     meta["site_id"] = cfg.get("site_id")
                                     meta["camera_id"] = cfg.get("camera_id")
                                     meta["entry_time_epoch"] = entry_ts
+                                    meta["coexistence_start_epoch"] = coexist_start_ts
                                     meta["greet_time_epoch"] = greet_ts
-                                    meta["greet_delay_sec"] = greet_ts - entry_ts
-                                    meta["greet_hits"] = state["session"].get("greet_hits")
+                                    meta["entry_to_coexistence_sec"] = coexist_start_ts - entry_ts
+                                    meta["coexistence_duration_sec"] = coexistence_duration
                                     meta["duration_str"] = dur_str
                                     # (removed frame dimensions and per-box lists by user request)
                                     meta["model_path"] = MODEL_PATH if "MODEL_PATH" in globals() else None
                                     # friendly timestamps in ISO
                                     try:
                                         meta["entry_time"] = datetime.fromtimestamp(entry_ts, IST).isoformat()
+                                        meta["coexistence_start_time"] = datetime.fromtimestamp(coexist_start_ts, IST).isoformat()
                                         meta["greet_time"] = datetime.fromtimestamp(greet_ts, IST).isoformat()
                                     except Exception:
                                         meta["entry_time"] = entry_ts
+                                        meta["coexistence_start_time"] = coexist_start_ts
                                         meta["greet_time"] = greet_ts
 
                                     json_path = os.path.splitext(greet_path)[0] + ".json"
@@ -580,10 +582,23 @@ def run_camera(cfg):
                                 except Exception as je:
                                     logger.warning(f"Failed to write greet metadata JSON: {je}")
                                 logger.info(f"📸 GREET SAVED → {greet_path}")
- 
-                                state["rect2_last_seen_time"] = now
-                                state["session"]["done"]      = True
-                                state["cooldown_until"]       = now + COOLDOWN_SEC
+
+                                # Start gap-counting immediately after save so
+                                # future co-presence windows are evaluated against
+                                # GREET_GAP_TOLERANCE. Reset the coexistence timer
+                                # so a new 2s window can begin when another customer
+                                # arrives. Apply a short post-save cooldown to avoid
+                                # duplicate saves from the same ongoing interaction.
+                                state["rect2_last_seen_time"] = frame_timestamp
+                                state["session"]["coexistence_start_time"] = None
+                                state["session"]["last_coexistence_time"] = frame_timestamp
+                                state["session"]["done"] = False
+                                # Use a short cooldown after save (configurable)
+                                try:
+                                    post_cd = POST_SAVE_COOLDOWN_SEC
+                                except Exception:
+                                    post_cd = 2.0
+                                state["cooldown_until"] = frame_timestamp + post_cd
  
                 # ── PREVIEW RENDERING ─────────────────────────────────────────
                 if not HEADLESS:
@@ -614,7 +629,7 @@ def run_camera(cfg):
                                       (max(b[2] for b in all_b), max(b[3] for b in all_b)),
                                       (0,255,255), 3)
  
-                    preview = draw_hud(preview, state, cfg, now)
+                    preview = draw_hud(preview, state, cfg, frame_timestamp)
                     cv2.imshow(win_name, preview)
                     key = cv2.waitKey(1) & 0xFF
                     if key == ord("q") or key == 27:

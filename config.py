@@ -351,14 +351,19 @@ RECT2_ABSENCE_ABORT_SEC = 20
 USE_TIME_BASED_RECT2 = True
 RECT2_CONFIRM_SEC = 0.5
 
-# ===================== GREET HIT COUNTING Parameters =====================
-GREET_HIT_THRESHOLD = 4
-GREET_GAP_TOLERANCE = 5.0   # RC3 fix: was 0.5s — too short for multi-cam inference jitter
-SESSION_MAX_SEC = 40
+# ===================== GREET COEXISTENCE Parameters =====================
+# Coexistence: When customer + staff are both in zone 2 for ≥2 seconds, save event.
+# Gap tolerance: If they separate for >5s, restart the coexistence timer.
+GREET_GAP_TOLERANCE = 5.0   # Max absence before restarting coexistence timer (seconds)
+SESSION_MAX_SEC = 40        # Max session duration before auto-abort (seconds)
 
 # ===================== COOLDOWN & RECOVERY =====================
 COOLDOWN_SEC = 30
 
+# After a greet is saved, use a short post-save cooldown before allowing
+# the next coexistence window to start. This prevents immediate duplicate
+# saves while allowing a fast restart when a new customer arrives.
+POST_SAVE_COOLDOWN_SEC = 2.0
 # ===================== DETECTION & FILTERING =====================
 CONF_THRESHOLD = 0.30
 MIN_W, MIN_H = 40, 100
