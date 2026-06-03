@@ -172,7 +172,7 @@ RTSP_CAMERAS = [
     # index: 11
     # ── WARANGAL — polygon zones
     {
-        "rtsp_url": "rtsp://Bluecloud:User%401964@103.89.55.147:8001/Streaming/Channels/701",
+        "rtsp_url": "rtsp://Bluecloud:User%401964@183.82.105.66:8001/Streaming/Channels/701",
         "camera_id": "GF-15-CAM-7",
         "site_id": "15",
         "site_name": "warangal-store",
@@ -283,8 +283,8 @@ RTSP_CAMERAS = [
     # index: 20
     # ── RAJAHMUNDRY — polygon zones
     {
-        "rtsp_url": "rtsp://Bluecloud:User%401964@106.51.52.101:8001/Streaming/Channels/1501",
-        "camera_id": "GF-14-CAM-15",
+        "rtsp_url": "rtsp://Bluecloud:User%401964@106.51.52.101:8001/Streaming/Channels/401",
+        "camera_id": "GF-14-CAM-4",
         "site_id": "14",
         "site_name": "rajahmundry-store",
         "zone_mode": "poly",
@@ -295,8 +295,8 @@ RTSP_CAMERAS = [
     # index: 21
     # ── KURNOOL — polygon zones
     {
-        "rtsp_url": "rtsp://Bluecloud:User%401964@103.206.112.148:8001/Streaming/Channels/1801",
-        "camera_id": "GF-16-CAM-18",
+        "rtsp_url": "rtsp://Bluecloud:User%401964@103.206.112.148:8001/Streaming/Channels/501",
+        "camera_id": "GF-16-CAM-5",
         "site_id": "16",
         "site_name": "kurnool-store",
         "zone_mode": "poly",
@@ -307,8 +307,8 @@ RTSP_CAMERAS = [
     # index: 22
     # ── SRIKAKULAM — polygon zones
     {
-        "rtsp_url": "rtsp://Bluecloud:User%401964@175.101.130.104:8001/Streaming/Channels/2701",
-        "camera_id": "GF-20-CAM-27",
+        "rtsp_url": "rtsp://Bluecloud:User%401964@175.101.130.104:8001/Streaming/Channels/401",
+        "camera_id": "GF-20-CAM-4",
         "site_id": "20",
         "site_name": "srikakulam-store",
         "zone_mode": "poly",
@@ -319,8 +319,8 @@ RTSP_CAMERAS = [
     # index: 23
     # ── TIRUPATHI — polygon zones
     {
-        "rtsp_url": "rtsp://Bluecloud:User%401964@202.83.31.24:8001/Streaming/Channels/2101",
-        "camera_id": "GF-23-CAM-21",
+        "rtsp_url": "rtsp://Bluecloud:User%401964@202.83.31.24:8001/Streaming/Channels/401",
+        "camera_id": "GF-23-CAM-4",
         "site_id": "23",
         "site_name": "tirupathi-store",
         "zone_mode": "poly",
@@ -331,8 +331,8 @@ RTSP_CAMERAS = [
     # index: 24
     # ── ONGOLE — polygon zones
     {
-        "rtsp_url": "rtsp://Bluecloud:User%401964@175.101.81.163:8001/Streaming/Channels/501",
-        "camera_id": "GF-27-CAM-5",
+        "rtsp_url": "rtsp://Bluecloud:User%401964@175.101.81.163:8001/Streaming/Channels/301",
+        "camera_id": "GF-27-CAM-3",
         "site_id": "27",
         "site_name": "ongole-store",
         "zone_mode": "poly",
@@ -343,8 +343,8 @@ RTSP_CAMERAS = [
     # index: 25
     # ── VIZIANAGARAM — polygon zones
     {
-        "rtsp_url": "rtsp://Bluecloud:User%401964@106.51.52.2:8001/Streaming/Channels/1301",
-        "camera_id": "GF-29-CAM-13",
+        "rtsp_url": "rtsp://Bluecloud:User%401964@106.51.52.2:8001/Streaming/Channels/301",
+        "camera_id": "GF-29-CAM-3",
         "site_id": "29",
         "site_name": "vizianagaram-store",
         "zone_mode": "poly",
