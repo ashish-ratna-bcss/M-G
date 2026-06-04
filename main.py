@@ -272,7 +272,7 @@ def draw_hud(frame, state, cfg, now_ts):
     sep()
  
     if session:
-        elapsed = now - session["start"]
+        elapsed = now_ts - session["start"]
         t_col = (0,200,80) if elapsed < SESSION_MAX_SEC * 0.75 else (0,80,255)
         txt(f"Session : {elapsed:.1f}s / {SESSION_MAX_SEC}s", t_col, scale=0.44)
     else:
@@ -487,6 +487,27 @@ def run_camera(cfg):
                     state["rect2_last_seen_time"] = None
                     state["entry_candidate_hits"] = 0
  
+                # ── COMPLETED INTERACTION: avoid duplicate screenshots ────────
+                # After one greet snapshot is saved, keep the session closed while
+                # the same continuous customer+staff co-presence remains in zone 2.
+                # Re-arm only after that co-presence has been gone long enough.
+                if (state["session"] and state["rect2_confirmed"] and
+                        state["session"].get("done")):
+                    cust_in_greet_done  = [c for c in customers if box_in_zone(c, zones["zone2_px"], mode)]
+                    staff_in_greet_done = staff_intersects_zone(green_staff, zones["zone2_px"], mode)
+
+                    if cust_in_greet_done and staff_in_greet_done:
+                        state["rect2_last_seen_time"] = frame_timestamp
+                    elif (state["rect2_last_seen_time"] and
+                            frame_timestamp - state["rect2_last_seen_time"] > GREET_GAP_TOLERANCE):
+                        logger.info(f"✅ Completed greet interaction reset → {cam_key}")
+                        state["session"]             = None
+                        state["rect2_confirmed"]      = False
+                        state["rect2_hits"]           = 0
+                        state["rect2_last_seen_time"] = None
+                        state["entry_candidate_hits"] = 0
+                        state["rect2_confirm_start_time"] = None
+
                 # ── MEET & GREET hit counting ─────────────────────────────────
                 if (state["session"] and state["rect2_confirmed"] and
                         not state["session"]["done"] and frame_timestamp >= state["cooldown_until"]):
@@ -583,16 +604,14 @@ def run_camera(cfg):
                                     logger.warning(f"Failed to write greet metadata JSON: {je}")
                                 logger.info(f"📸 GREET SAVED → {greet_path}")
 
-                                # Start gap-counting immediately after save so
-                                # future co-presence windows are evaluated against
-                                # GREET_GAP_TOLERANCE. Reset the coexistence timer
-                                # so a new 2s window can begin when another customer
-                                # arrives. Apply a short post-save cooldown to avoid
-                                # duplicate saves from the same ongoing interaction.
+                                # Mark this session complete so the same continuous
+                                # interaction cannot generate repeated snapshots.
+                                # The completed-interaction block re-arms after
+                                # co-presence leaves zone 2 for long enough.
                                 state["rect2_last_seen_time"] = frame_timestamp
                                 state["session"]["coexistence_start_time"] = None
                                 state["session"]["last_coexistence_time"] = frame_timestamp
-                                state["session"]["done"] = False
+                                state["session"]["done"] = True
                                 # Use a short cooldown after save (configurable)
                                 try:
                                     post_cd = POST_SAVE_COOLDOWN_SEC

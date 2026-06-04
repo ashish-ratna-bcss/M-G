@@ -1,0 +1,16 @@
+{
+  "event_type": "greet",
+  "site_name": "himayatnagar",
+  "site_id": "6",
+  "camera_id": "GF-6-CAM-2",
+  "entry_time_epoch": 1780490448.3942573,
+  "coexistence_start_epoch": 1780490453.1182337,
+  "greet_time_epoch": 1780490456.2396553,
+  "entry_to_coexistence_sec": 4.723976373672485,
+  "coexistence_duration_sec": 3.1214215755462646,
+  "duration_str": "3sec",
+  "model_path": "/home/ashish-ratna/PMJ/Meet&Greet/security_latest 2.pt",
+  "entry_time": "2026-06-03T18:10:48.394257+05:30",
+  "coexistence_start_time": "2026-06-03T18:10:53.118234+05:30",
+  "greet_time": "2026-06-03T18:10:56.239655+05:30"
+}
