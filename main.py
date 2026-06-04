@@ -414,387 +414,294 @@ def decode_loop(cfg: dict) -> None:
     logger.info(f"🛑 DECODE EXITED → {cam_key}")
 
 
-# ===================== CAMERA THREAD (legacy — replaced by decode_loop + state_machine_loop) =====================
-def run_camera(cfg):
-    cam_key  = cfg["camera_id"]
-    rtsp_url = cfg["rtsp_url"]
-    mode     = cfg["zone_mode"]
- 
+# ===================== STATE MACHINE THREAD =====================
+def state_machine_loop(cfg: dict) -> None:
+    """
+    Greet KPI logic — reads InferenceResult from per-camera result queue.
+    All greet detection, coexistence tracking, and snapshot saving unchanged.
+    No GPU access — pure CPU state machine.
+    """
+    cam_key = cfg["camera_id"]
+    mode    = cfg["zone_mode"]
+
     state = {
-        "session":              None,
-        "rect2_hits":           0,
-        "rect2_confirmed":      False,
-        "rect2_last_seen_time": None,
-        "cooldown_until":       0,
-        "entry_candidate_hits": 0,
+        "session":                    None,
+        "rect2_hits":                 0,
+        "rect2_confirmed":            False,
+        "rect2_last_seen_time":       None,
+        "cooldown_until":             0,
+        "entry_candidate_hits":       0,
         "entry_candidate_start_time": None,
-        "rect2_confirm_start_time": None,
-        "customer_count":       0,
-        "staff_count":          0,
+        "rect2_confirm_start_time":   None,
+        "customer_count":             0,
+        "staff_count":                0,
     }
- 
-    last_frame_time[cam_key] = time.time()
-    zones = {}  # filled after first frame resolves
- 
+
     win_name = f"Meet & Greet — {cam_key}"
     if not HEADLESS:
         cv2.namedWindow(win_name, cv2.WINDOW_NORMAL)
 
-    cap = None
-    while not stop_events[cam_key].is_set():  # outer self-restart loop
+    q = result_queues.get(cam_key)
+    if q is None:
+        logger.error(f"state_machine_loop: no result queue for {cam_key}")
+        return
+
+    while not stop_events[cam_key].is_set():
+        # ── Get next inference result ─────────────────────────────────────
         try:
-            cap = make_fresh_cap(rtsp_url)
-            logger.info(f"🎥 STARTED → {cam_key} ({cfg['site_name']}) | mode={mode}")
-
-            first_frame_logged = False
-            first_frame_start  = time.time()
-            failed_reads       = 0
-
-            while not stop_events[cam_key].is_set():
-                # ── Watchdog restart ─────────────────────────────────────────
-                if restart_events[cam_key].is_set():
-                    logger.warning(f"🔄 Watchdog restart → {cam_key}")
-                    restart_events[cam_key].clear()
-                    break
-
-                # ── Flush stale buffer ────────────────────────────────────────
-                cap.grab()
-                cap.grab()
-                ret, frame = cap.retrieve()
-
-                if not ret:
-                    failed_reads += 1
-                    if failed_reads >= 30:
-                        logger.warning(f"🔄 30 failed reads, reconnecting → {cam_key}")
-                        break
-                    time.sleep(0.1)
-                    continue
-                failed_reads = 0
-               
-                # ── Capture frame timestamp BEFORE processing to decouple from inference latency ──
-                frame_timestamp = time.time()
-                
-                frame = cv2.resize(frame, (PREVIEW_WINDOW_W, PREVIEW_WINDOW_H))
- 
-                # ── First frame: build zones from ratios ──────────────────────
-                if not first_frame_logged:
-                    if time.time() - first_frame_start > 10:
-                        logger.warning(f"⏳ First frame took >10s → {cam_key}")
-                    frame_h, frame_w = frame.shape[:2]
-                    fps_cam = cap.get(cv2.CAP_PROP_FPS)
-                    logger.info(f"📊 {cam_key} Resolution: {frame_w}x{frame_h} @ {fps_cam:.1f} FPS")
- 
-                    # Convert ratios → pixel points (works for both rect and poly)
-                    z1_px = ratios_to_poly(cfg["entry_zone_1_ratios"], frame_w, frame_h)
-                    z2_px = ratios_to_poly(cfg["entry_zone_2_ratios"], frame_w, frame_h)
- 
-                    zones = {
-                        "zone1_px"   : z1_px,   # entry zone pixel points
-                        "zone2_px"   : z2_px,   # greet zone pixel points
-                        # rect fallback (used only for rect mode drawing)
-                        "zone1_rect" : ratios_to_rect(cfg["entry_zone_1_ratios"], frame_w, frame_h),
-                        "zone2_rect" : ratios_to_rect(cfg["entry_zone_2_ratios"], frame_w, frame_h),
-                    }
-                    first_frame_logged = True
-
-                # Use frame_timestamp for all state machine decisions (not wall-clock now)
-                # This ensures KPI accuracy: events timestamped at frame capture, not post-inference
-                if frame_timestamp - last_frame_time[cam_key] < FRAME_INTERVAL:
-                    continue
-                last_frame_time[cam_key] = frame_timestamp
- 
-                # ── Session timeout ───────────────────────────────────────────
-                if state["session"] and frame_timestamp - state["session"]["start"] >= SESSION_MAX_SEC:
-                    logger.info(f"⏰ Session timed out @ {frame_timestamp} → {cam_key}")
+            inf_result: InferenceResult = q.get(timeout=1.0)
+        except _queue.Empty:
+            # No inference arrived — check session timeout via wall clock
+            if state["session"]:
+                now = time.time()
+                if now - state["session"]["start"] >= SESSION_MAX_SEC:
+                    logger.info(f"⏰ Session timed out @ {now} → {cam_key}")
                     state["session"]             = None
                     state["rect2_hits"]          = 0
                     state["rect2_confirmed"]      = False
                     state["rect2_last_seen_time"] = None
                     state["entry_candidate_hits"] = 0
- 
-                # ── YOLO Detection ────────────────────────────────────────────
-                # Guard: model may be unloaded during business-hours-end transition.
-                local_model = model
-                if local_model is None:
-                    time.sleep(0.1)
-                    continue
-                results = local_model.predict(
-                    frame, conf=CONF_THRESHOLD, device=DEVICE,
-                    agnostic_nms=True, verbose=False
-                )[0]
- 
-                green_staff = []
-                customers   = []
- 
-                if results.boxes is not None:
-                    boxes = results.boxes.xyxy.cpu().numpy().astype(int)
-                    clss  = results.boxes.cls.cpu().numpy().astype(int)
-                    confs = results.boxes.conf.cpu().numpy()
-                    for b, c, conf in zip(boxes, clss, confs):
-                        if c in staff_cls_ids:
-                            if conf >= CONF_THRESHOLD:
-                                green_staff.append(b)
-                        elif c in customer_cls_ids:
-                            if (conf >= CONF_THRESHOLD and
-                                    (b[2]-b[0]) >= MIN_W and (b[3]-b[1]) >= MIN_H):
-                                customers.append(b)
- 
-                state["customer_count"] = len(customers)
-                state["staff_count"]    = len(green_staff)
- 
-                # ── ENTRY ZONE (zone1) — session trigger ──────────────────────
-                # foot center of customer must be inside entry_zone_1
-                cust_in_entry = customer_foot_in_zone(customers, zones["zone1_px"], mode)
- 
-                if cust_in_entry and state["session"] is None:
-                    # Instant trigger: no debounce, start session immediately upon detection
-                    state["session"] = {
-                        "start":                   frame_timestamp,
-                        "coexistence_start_time":  None,  # When customer + staff first together in zone 2
-                        "last_coexistence_time":   None,  # Last frame when both were together
-                        "done":                    False
-                    }
-                    state["entry_candidate_hits"] = 0
-                    state["entry_candidate_start_time"] = None
-                    logger.info(f"👤 SESSION STARTED (instant) → {cam_key}")
-                else:
-                    if state["session"] is None:
-                        state["entry_candidate_hits"] = 0
-                        state["entry_candidate_start_time"] = None
- 
-                # ── GREET ZONE (zone2) — rect-2 confirmation ──────────────────
-                # Both customer and staff: any part of bbox overlaps greet zone
-                if state["session"] and not state["rect2_confirmed"]:
-                    cust_in_greet  = [c for c in customers if box_in_zone(c, zones["zone2_px"], mode)]
-                    staff_in_greet = staff_intersects_zone(green_staff, zones["zone2_px"], mode)
+            continue
 
-                    if cust_in_greet and staff_in_greet:
-                        if USE_TIME_BASED_RECT2:
-                            if state["rect2_confirm_start_time"] is None:
-                                state["rect2_confirm_start_time"] = frame_timestamp
-                            elif frame_timestamp - state["rect2_confirm_start_time"] >= RECT2_CONFIRM_SEC:
-                                state["rect2_confirmed"]      = True
-                                state["rect2_last_seen_time"] = frame_timestamp
-                                state["rect2_confirm_start_time"] = None
-                                logger.info(f"✅ GREET ZONE CONFIRMED → {cam_key}")
-                            else:
-                                state["rect2_last_seen_time"] = frame_timestamp
-                        else:
-                            state["rect2_hits"] += 1
-                            state["rect2_last_seen_time"] = frame_timestamp
-                            if state["rect2_hits"] >= RECT2_CONFIRM_FRAMES:
-                                state["rect2_confirmed"]      = True
-                                state["rect2_last_seen_time"] = frame_timestamp
-                                logger.info(f"✅ GREET ZONE CONFIRMED → {cam_key}")
+        frame           = inf_result.frame
+        frame_timestamp = inf_result.frame_timestamp
+        customers       = inf_result.customers
+        green_staff     = inf_result.green_staff
+
+        # ── Wait for zones to be built by decode thread ───────────────────
+        zones = zones_dict.get(cam_key)
+        if not zones:
+            continue
+
+        state["customer_count"] = len(customers)
+        state["staff_count"]    = len(green_staff)
+
+        # ── Session timeout ───────────────────────────────────────────────
+        if state["session"] and frame_timestamp - state["session"]["start"] >= SESSION_MAX_SEC:
+            logger.info(f"⏰ Session timed out @ {frame_timestamp} → {cam_key}")
+            state["session"]             = None
+            state["rect2_hits"]          = 0
+            state["rect2_confirmed"]      = False
+            state["rect2_last_seen_time"] = None
+            state["entry_candidate_hits"] = 0
+
+        # ── ENTRY ZONE (zone1) — session trigger ──────────────────────────
+        cust_in_entry = customer_foot_in_zone(customers, zones["zone1_px"], mode)
+
+        if cust_in_entry and state["session"] is None:
+            state["session"] = {
+                "start":                  frame_timestamp,
+                "coexistence_start_time": None,
+                "last_coexistence_time":  None,
+                "done":                   False,
+            }
+            state["entry_candidate_hits"]       = 0
+            state["entry_candidate_start_time"] = None
+            logger.info(f"👤 SESSION STARTED (instant) → {cam_key}")
+        else:
+            if state["session"] is None:
+                state["entry_candidate_hits"]       = 0
+                state["entry_candidate_start_time"] = None
+
+        # ── GREET ZONE (zone2) — confirmation ────────────────────────────
+        if state["session"] and not state["rect2_confirmed"]:
+            cust_in_greet  = [c for c in customers if box_in_zone(c, zones["zone2_px"], mode)]
+            staff_in_greet = staff_intersects_zone(green_staff, zones["zone2_px"], mode)
+
+            if cust_in_greet and staff_in_greet:
+                if USE_TIME_BASED_RECT2:
+                    if state["rect2_confirm_start_time"] is None:
+                        state["rect2_confirm_start_time"] = frame_timestamp
+                    elif frame_timestamp - state["rect2_confirm_start_time"] >= RECT2_CONFIRM_SEC:
+                        state["rect2_confirmed"]          = True
+                        state["rect2_last_seen_time"]     = frame_timestamp
+                        state["rect2_confirm_start_time"] = None
+                        logger.info(f"✅ GREET ZONE CONFIRMED → {cam_key}")
                     else:
-                        state["rect2_hits"] = 0
-                        state["rect2_confirm_start_time"] = None
- 
-                # ── ABSENCE ABORT ─────────────────────────────────────────────
-                if (state["session"] and state["rect2_confirmed"] and
-                        state["rect2_last_seen_time"] and
-                        frame_timestamp - state["rect2_last_seen_time"] > RECT2_ABSENCE_ABORT_SEC):
-                    logger.info(f"🚫 Greet zone absence abort → {cam_key}")
-                    state["session"]             = None
-                    state["rect2_confirmed"]      = False
-                    state["rect2_hits"]           = 0
-                    state["rect2_last_seen_time"] = None
-                    state["entry_candidate_hits"] = 0
- 
-                # ── COMPLETED INTERACTION: avoid duplicate screenshots ────────
-                # After one greet snapshot is saved, keep the session closed while
-                # the same continuous customer+staff co-presence remains in zone 2.
-                # Re-arm only after that co-presence has been gone long enough.
-                if (state["session"] and state["rect2_confirmed"] and
-                        state["session"].get("done")):
-                    cust_in_greet_done  = [c for c in customers if box_in_zone(c, zones["zone2_px"], mode)]
-                    staff_in_greet_done = staff_intersects_zone(green_staff, zones["zone2_px"], mode)
-
-                    if cust_in_greet_done and staff_in_greet_done:
                         state["rect2_last_seen_time"] = frame_timestamp
-                    elif (state["rect2_last_seen_time"] and
-                            frame_timestamp - state["rect2_last_seen_time"] > GREET_GAP_TOLERANCE):
-                        logger.info(f"✅ Completed greet interaction reset → {cam_key}")
-                        state["session"]             = None
-                        state["rect2_confirmed"]      = False
-                        state["rect2_hits"]           = 0
-                        state["rect2_last_seen_time"] = None
-                        state["entry_candidate_hits"] = 0
-                        state["rect2_confirm_start_time"] = None
-
-                # ── MEET & GREET hit counting ─────────────────────────────────
-                if (state["session"] and state["rect2_confirmed"] and
-                        not state["session"]["done"] and frame_timestamp >= state["cooldown_until"]):
- 
-                    cust_in_greet  = [c for c in customers if box_in_zone(c, zones["zone2_px"], mode)]
-                    staff_in_greet = staff_intersects_zone(green_staff, zones["zone2_px"], mode)
- 
-                    if cust_in_greet and staff_in_greet:
-                        # Track coexistence time (when both are together in zone 2)
+                else:
+                    state["rect2_hits"] += 1
+                    state["rect2_last_seen_time"] = frame_timestamp
+                    if state["rect2_hits"] >= RECT2_CONFIRM_FRAMES:
+                        state["rect2_confirmed"]      = True
                         state["rect2_last_seen_time"] = frame_timestamp
-                        
-                        # Initialize coexistence tracking on first co-presence
-                        if state["session"]["coexistence_start_time"] is None:
-                            state["session"]["coexistence_start_time"] = frame_timestamp
-                            state["session"]["last_coexistence_time"] = frame_timestamp
-                            logger.info(f"🤝 Customer + Staff coexistence started → {cam_key}")
-                        else:
-                            # Check for gap since last time both were together
-                            gap_since_last = frame_timestamp - state["session"]["last_coexistence_time"]
-                            if gap_since_last > GREET_GAP_TOLERANCE:
-                                # Gap exceeded 5s, reset coexistence timer
-                                state["session"]["coexistence_start_time"] = frame_timestamp
-                                logger.info(f"⏸️ Coexistence gap reset ({gap_since_last:.1f}s > {GREET_GAP_TOLERANCE}s) → {cam_key}")
-                            
-                            # Update last coexistence timestamp
-                            state["session"]["last_coexistence_time"] = frame_timestamp
-                        
-                        coexistence_duration = frame_timestamp - state["session"]["coexistence_start_time"]
+                        logger.info(f"✅ GREET ZONE CONFIRMED → {cam_key}")
+            else:
+                state["rect2_hits"]               = 0
+                state["rect2_confirm_start_time"] = None
 
-                        # ── Save snapshot when 2+ seconds of coexistence ──────────────
-                        if coexistence_duration >= 2.0:
-                                dur_str = (f"{int(coexistence_duration)}sec"
-                                           if coexistence_duration < 60
-                                           else f"{round(coexistence_duration/60,2)}mins")
- 
-                                snap = frame.copy()
-                                for b in cust_in_greet:
-                                    cv2.rectangle(snap, (b[0],b[1]), (b[2],b[3]), (0,255,0), 4)
-                                    cv2.putText(snap, "CUSTOMER", (b[0], b[1]-10),
-                                                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,255,0), 2)
-                                for b in staff_in_greet:
-                                    cv2.rectangle(snap, (b[0],b[1]), (b[2],b[3]), (0,0,255), 4)
-                                    cv2.putText(snap, "STAFF", (b[0], b[1]-10),
-                                                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,0,255), 2)
- 
-                                all_boxes = cust_in_greet + staff_in_greet
-                                gx1 = min(b[0] for b in all_boxes)
-                                gy1 = min(b[1] for b in all_boxes)
-                                gx2 = max(b[2] for b in all_boxes)
-                                gy2 = max(b[3] for b in all_boxes)
-                                cv2.rectangle(snap, (gx1,gy1), (gx2,gy2), (0,255,255), 4)
-                                annotate_banner(snap, f"MEET & GREET ({dur_str})")
- 
-                                greet_path = get_output_path(
-                                    event_type="greet",
-                                    site_name=cfg["site_name"],
-                                    camera_id=cfg["camera_id"],
-                                    site_id=cfg["site_id"],
-                                    dur_str=dur_str
-                                )
-                                cv2.imwrite(greet_path, snap)
-                                # Also write a JSON metadata file alongside the image
-                                try:
-                                    meta = {}
-                                    entry_ts = state["session"]["start"]
-                                    coexist_start_ts = state["session"]["coexistence_start_time"]
-                                    greet_ts = frame_timestamp
-                                    meta["event_type"] = "greet"
-                                    meta["site_name"] = cfg.get("site_name")
-                                    meta["site_id"] = cfg.get("site_id")
-                                    meta["camera_id"] = cfg.get("camera_id")
-                                    meta["entry_time_epoch"] = entry_ts
-                                    meta["coexistence_start_epoch"] = coexist_start_ts
-                                    meta["greet_time_epoch"] = greet_ts
-                                    meta["entry_to_coexistence_sec"] = coexist_start_ts - entry_ts
-                                    meta["coexistence_duration_sec"] = coexistence_duration
-                                    meta["duration_str"] = dur_str
-                                    # (removed frame dimensions and per-box lists by user request)
-                                    meta["model_path"] = MODEL_PATH if "MODEL_PATH" in globals() else None
-                                    # friendly timestamps in ISO
-                                    try:
-                                        meta["entry_time"] = datetime.fromtimestamp(entry_ts, IST).isoformat()
-                                        meta["coexistence_start_time"] = datetime.fromtimestamp(coexist_start_ts, IST).isoformat()
-                                        meta["greet_time"] = datetime.fromtimestamp(greet_ts, IST).isoformat()
-                                    except Exception:
-                                        meta["entry_time"] = entry_ts
-                                        meta["coexistence_start_time"] = coexist_start_ts
-                                        meta["greet_time"] = greet_ts
+        # ── ABSENCE ABORT ─────────────────────────────────────────────────
+        if (state["session"] and state["rect2_confirmed"] and
+                state["rect2_last_seen_time"] and
+                frame_timestamp - state["rect2_last_seen_time"] > RECT2_ABSENCE_ABORT_SEC):
+            logger.info(f"🚫 Greet zone absence abort → {cam_key}")
+            state["session"]             = None
+            state["rect2_confirmed"]      = False
+            state["rect2_hits"]           = 0
+            state["rect2_last_seen_time"] = None
+            state["entry_candidate_hits"] = 0
 
-                                    json_path = os.path.splitext(greet_path)[0] + ".json"
-                                    with open(json_path, "w") as jf:
-                                        json.dump(meta, jf, indent=2)
-                                except Exception as je:
-                                    logger.warning(f"Failed to write greet metadata JSON: {je}")
-                                logger.info(f"📸 GREET SAVED → {greet_path}")
+        # ── COMPLETED INTERACTION guard ───────────────────────────────────
+        if (state["session"] and state["rect2_confirmed"] and
+                state["session"].get("done")):
+            cust_in_greet_done  = [c for c in customers if box_in_zone(c, zones["zone2_px"], mode)]
+            staff_in_greet_done = staff_intersects_zone(green_staff, zones["zone2_px"], mode)
 
-                                # Mark this session complete so the same continuous
-                                # interaction cannot generate repeated snapshots.
-                                # The completed-interaction block re-arms after
-                                # co-presence leaves zone 2 for long enough.
-                                state["rect2_last_seen_time"] = frame_timestamp
-                                state["session"]["coexistence_start_time"] = None
-                                state["session"]["last_coexistence_time"] = frame_timestamp
-                                state["session"]["done"] = True
-                                # Use a short cooldown after save (configurable)
-                                try:
-                                    post_cd = POST_SAVE_COOLDOWN_SEC
-                                except Exception:
-                                    post_cd = 2.0
-                                state["cooldown_until"] = frame_timestamp + post_cd
- 
-                # ── PREVIEW RENDERING ─────────────────────────────────────────
-                if not HEADLESS:
-                    preview = frame.copy()
- 
-                    if zones:
-                        draw_zones_on_preview(
-                            preview, zones, state["rect2_confirmed"], mode
+            if cust_in_greet_done and staff_in_greet_done:
+                state["rect2_last_seen_time"] = frame_timestamp
+            elif (state["rect2_last_seen_time"] and
+                    frame_timestamp - state["rect2_last_seen_time"] > GREET_GAP_TOLERANCE):
+                logger.info(f"✅ Completed greet interaction reset → {cam_key}")
+                state["session"]                 = None
+                state["rect2_confirmed"]          = False
+                state["rect2_hits"]               = 0
+                state["rect2_last_seen_time"]     = None
+                state["entry_candidate_hits"]     = 0
+                state["rect2_confirm_start_time"] = None
+
+        # ── MEET & GREET hit counting + snapshot ──────────────────────────
+        if (state["session"] and state["rect2_confirmed"] and
+                not state["session"]["done"] and frame_timestamp >= state["cooldown_until"]):
+
+            cust_in_greet  = [c for c in customers if box_in_zone(c, zones["zone2_px"], mode)]
+            staff_in_greet = staff_intersects_zone(green_staff, zones["zone2_px"], mode)
+
+            if cust_in_greet and staff_in_greet:
+                state["rect2_last_seen_time"] = frame_timestamp
+
+                if state["session"]["coexistence_start_time"] is None:
+                    state["session"]["coexistence_start_time"] = frame_timestamp
+                    state["session"]["last_coexistence_time"]  = frame_timestamp
+                    logger.info(f"🤝 Customer + Staff coexistence started → {cam_key}")
+                else:
+                    gap_since_last = frame_timestamp - state["session"]["last_coexistence_time"]
+                    if gap_since_last > GREET_GAP_TOLERANCE:
+                        state["session"]["coexistence_start_time"] = frame_timestamp
+                        logger.info(
+                            f"⏸️ Coexistence gap reset ({gap_since_last:.1f}s > "
+                            f"{GREET_GAP_TOLERANCE}s) → {cam_key}"
                         )
- 
-                    for b in customers:
-                        cv2.rectangle(preview, (b[0],b[1]), (b[2],b[3]), (0,255,0), 2)
-                        cv2.putText(preview, "CUSTOMER", (b[0], b[1]-8),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0,255,0), 1, cv2.LINE_AA)
- 
-                    for b in green_staff:
-                        cv2.rectangle(preview, (b[0],b[1]), (b[2],b[3]), (255,80,0), 2)
-                        cv2.putText(preview, "STAFF", (b[0], b[1]-8),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255,80,0), 1, cv2.LINE_AA)
- 
-                    # Group bbox when both in greet zone
-                    c_greet = customer_foot_in_zone(customers,   zones["zone2_px"], mode)
-                    s_greet = staff_intersects_zone(green_staff, zones["zone2_px"], mode)
-                    if c_greet and s_greet:
-                        all_b = c_greet + s_greet
-                        cv2.rectangle(preview,
-                                      (min(b[0] for b in all_b), min(b[1] for b in all_b)),
-                                      (max(b[2] for b in all_b), max(b[3] for b in all_b)),
-                                      (0,255,255), 3)
- 
-                    preview = draw_hud(preview, state, cfg, frame_timestamp)
-                    cv2.imshow(win_name, preview)
-                    key = cv2.waitKey(1) & 0xFF
-                    if key == ord("q") or key == 27:
-                        logger.info(f"🛑 Quit key pressed → {cam_key}")
-                        return
- 
-        except Exception as e:
-            logger.error(f"❌ Crash in {cam_key}: {str(e)}", exc_info=True)
-            # Short backoff, but exit immediately if shutdown requested.
-            stop_events[cam_key].wait(timeout=5)
+                    state["session"]["last_coexistence_time"] = frame_timestamp
 
-        finally:
-            if cap is not None:
-                try:
-                    cap.release()
-                    logger.info(f"🔌 cap released → {cam_key}")
-                except Exception:
-                    pass
-                cap = None
+                coexistence_duration = frame_timestamp - state["session"]["coexistence_start_time"]
 
-        if stop_events[cam_key].is_set():
-            break
-        # Backoff before reconnect, but break out fast on shutdown.
-        stop_events[cam_key].wait(timeout=3)
+                if coexistence_duration >= 2.0:
+                    dur_str = (
+                        f"{int(coexistence_duration)}sec"
+                        if coexistence_duration < 60
+                        else f"{round(coexistence_duration / 60, 2)}mins"
+                    )
+
+                    snap = frame.copy()
+                    for b in cust_in_greet:
+                        cv2.rectangle(snap, (b[0], b[1]), (b[2], b[3]), (0, 255, 0), 4)
+                        cv2.putText(snap, "CUSTOMER", (b[0], b[1] - 10),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+                    for b in staff_in_greet:
+                        cv2.rectangle(snap, (b[0], b[1]), (b[2], b[3]), (0, 0, 255), 4)
+                        cv2.putText(snap, "STAFF", (b[0], b[1] - 10),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+
+                    all_boxes = cust_in_greet + staff_in_greet
+                    gx1 = min(b[0] for b in all_boxes)
+                    gy1 = min(b[1] for b in all_boxes)
+                    gx2 = max(b[2] for b in all_boxes)
+                    gy2 = max(b[3] for b in all_boxes)
+                    cv2.rectangle(snap, (gx1, gy1), (gx2, gy2), (0, 255, 255), 4)
+                    annotate_banner(snap, f"MEET & GREET ({dur_str})")
+
+                    greet_path = get_output_path(
+                        event_type="greet",
+                        site_name=cfg["site_name"],
+                        camera_id=cfg["camera_id"],
+                        site_id=cfg["site_id"],
+                        dur_str=dur_str,
+                    )
+                    cv2.imwrite(greet_path, snap)
+
+                    try:
+                        meta: dict = {}
+                        entry_ts         = state["session"]["start"]
+                        coexist_start_ts = state["session"]["coexistence_start_time"]
+                        greet_ts         = frame_timestamp
+                        meta["event_type"]               = "greet"
+                        meta["site_name"]                = cfg.get("site_name")
+                        meta["site_id"]                  = cfg.get("site_id")
+                        meta["camera_id"]                = cfg.get("camera_id")
+                        meta["entry_time_epoch"]         = entry_ts
+                        meta["coexistence_start_epoch"]  = coexist_start_ts
+                        meta["greet_time_epoch"]         = greet_ts
+                        meta["entry_to_coexistence_sec"] = coexist_start_ts - entry_ts
+                        meta["coexistence_duration_sec"] = coexistence_duration
+                        meta["duration_str"]             = dur_str
+                        meta["model_path"]               = MODEL_PATH
+                        try:
+                            meta["entry_time"]             = datetime.fromtimestamp(entry_ts, IST).isoformat()
+                            meta["coexistence_start_time"] = datetime.fromtimestamp(coexist_start_ts, IST).isoformat()
+                            meta["greet_time"]             = datetime.fromtimestamp(greet_ts, IST).isoformat()
+                        except Exception:
+                            meta["entry_time"]             = entry_ts
+                            meta["coexistence_start_time"] = coexist_start_ts
+                            meta["greet_time"]             = greet_ts
+
+                        json_path = os.path.splitext(greet_path)[0] + ".json"
+                        with open(json_path, "w") as jf:
+                            json.dump(meta, jf, indent=2)
+                    except Exception as je:
+                        logger.warning(f"Failed to write greet metadata JSON: {je}")
+
+                    logger.info(f"📸 GREET SAVED → {greet_path}")
+
+                    state["rect2_last_seen_time"]              = frame_timestamp
+                    state["session"]["coexistence_start_time"] = None
+                    state["session"]["last_coexistence_time"]  = frame_timestamp
+                    state["session"]["done"]                   = True
+                    state["cooldown_until"]                    = frame_timestamp + POST_SAVE_COOLDOWN_SEC
+
+        # ── PREVIEW RENDERING ─────────────────────────────────────────────
+        if not HEADLESS:
+            preview = frame.copy()
+            if zones:
+                draw_zones_on_preview(preview, zones, state["rect2_confirmed"], mode)
+            for b in customers:
+                cv2.rectangle(preview, (b[0], b[1]), (b[2], b[3]), (0, 255, 0), 2)
+                cv2.putText(preview, "CUSTOMER", (b[0], b[1] - 8),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 1, cv2.LINE_AA)
+            for b in green_staff:
+                cv2.rectangle(preview, (b[0], b[1]), (b[2], b[3]), (255, 80, 0), 2)
+                cv2.putText(preview, "STAFF", (b[0], b[1] - 8),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 80, 0), 1, cv2.LINE_AA)
+            c_greet = customer_foot_in_zone(customers,   zones["zone2_px"], mode)
+            s_greet = staff_intersects_zone(green_staff, zones["zone2_px"], mode)
+            if c_greet and s_greet:
+                all_b = c_greet + s_greet
+                cv2.rectangle(
+                    preview,
+                    (min(b[0] for b in all_b), min(b[1] for b in all_b)),
+                    (max(b[2] for b in all_b), max(b[3] for b in all_b)),
+                    (0, 255, 255), 3,
+                )
+            preview = draw_hud(preview, state, cfg, frame_timestamp)
+            cv2.imshow(win_name, preview)
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord("q") or key == 27:
+                logger.info(f"🛑 Quit key pressed → {cam_key}")
+                return
 
     if not HEADLESS:
         try:
             cv2.destroyWindow(win_name)
         except Exception:
             pass
-    logger.info(f"🛑 EXITED → {cam_key}")
- 
+    logger.info(f"🛑 STATE MACHINE EXITED → {cam_key}")
+
+
+def run_camera(cfg):
+    """Legacy stub — kept only to avoid NameError if referenced elsewhere. Not called."""
+    raise RuntimeError(
+        "run_camera() has been replaced by decode_loop() + state_machine_loop(). "
+        "Do not call run_camera() directly."
+    )
 # ===================== BUSINESS HOURS HELPER =====================
 def get_next_business_start():
     """
