@@ -724,38 +724,70 @@ def get_next_business_start():
     tomorrow = now + timedelta(days=1)
     return tomorrow.replace(hour=BUSINESS_START.hour, minute=BUSINESS_START.minute, second=0, microsecond=0)
 
-# ===================== MODEL LOADER (handles dynamic loading/unloading) =====================
-customer_cls_ids = []
-staff_cls_ids = []
+# ===================== MODEL LOADER =====================
+customer_cls_ids: list = []
+staff_cls_ids: list    = []
 
-def load_model_on_gpu():
-    """Load model to GPU when business hours start."""
-    global model, customer_cls_ids, staff_cls_ids
+def load_model_on_gpu() -> None:
+    """Load model, compute batch size, initialise FrameBuffer + result queues."""
+    global model, customer_cls_ids, staff_cls_ids, frame_buffer, result_queues, scheduler_stop_event
+
     if model is not None:
-        return  # Already loaded
-    
+        return  # already loaded
+
     logger.info(f"🧠 Loading model to {DEVICE.upper()} (CUDA Available: {torch.cuda.is_available()})")
     model = YOLO(MODEL_PATH)
     model.to(DEVICE)
-    
+
     customer_cls_ids = []
-    staff_cls_ids = []
+    staff_cls_ids    = []
     for idx, name in model.names.items():
         name_low = name.lower()
         if CUSTOMER_LABEL in name_low:
             customer_cls_ids.append(idx)
         if any(s in name_low for s in GREEN_STAFF_LABELS):
             staff_cls_ids.append(idx)
-    
+
+    if not customer_cls_ids:
+        raise RuntimeError(
+            f"Model class names do not contain '{CUSTOMER_LABEL}'. "
+            f"Available: {list(model.names.values())}. "
+            f"Fix CUSTOMER_LABEL in config.py."
+        )
+    if not staff_cls_ids:
+        raise RuntimeError(
+            f"Model class names do not match any of {GREEN_STAFF_LABELS}. "
+            f"Available: {list(model.names.values())}. "
+            f"Fix GREEN_STAFF_LABELS in config.py."
+        )
+
     logger.info(f"✅ Model loaded | Customer IDs: {customer_cls_ids} | Staff IDs: {staff_cls_ids}")
 
-def unload_model_from_gpu():
-    """Unload model from GPU when business hours end.
-    Caller MUST ensure all camera threads have exited before calling this,
-    otherwise they may try to invoke .predict() on a freed reference."""
-    global model
+    cam_keys      = [c["camera_id"] for c in RTSP_CAMERAS]
+    batch_size    = compute_batch_size(model, len(cam_keys))
+    frame_buffer  = FrameBuffer(cam_keys)
+    result_queues = {k: _queue.Queue(maxsize=2) for k in cam_keys}
+    scheduler_stop_event = threading.Event()
+    logger.info(
+        f"🗂️  FrameBuffer + result_queues initialised | "
+        f"cameras={len(cam_keys)} batch_size={batch_size}"
+    )
+
+
+def unload_model_from_gpu() -> None:
+    """Stop InferenceScheduler, unload model, free GPU memory."""
+    global model, _scheduler
+
+    if _scheduler is not None and _scheduler.is_alive():
+        logger.info("⏹️  Stopping InferenceScheduler...")
+        scheduler_stop_event.set()
+        _scheduler.join(timeout=10)
+        if _scheduler.is_alive():
+            logger.warning("⚠️  InferenceScheduler did not stop in time")
+        _scheduler = None
+
     if model is None:
-        return  # Already unloaded
+        return
 
     logger.info("🧹 Unloading model from GPU...")
     model = None
@@ -856,35 +888,67 @@ if __name__ == "__main__":
     active_threads = []
     watchdog_thread_obj = None
 
-    def _start_camera_threads():
-        """Spin up one thread per camera. Reset events + frame timestamps."""
-        global watchdog_thread_obj
+    def _start_camera_threads() -> list:
+        """Start InferenceScheduler + decode + state_machine threads."""
+        global _scheduler, scheduler_stop_event, watchdog_thread_obj
         load_model_on_gpu()
+
+        cam_keys   = [c["camera_id"] for c in RTSP_CAMERAS]
+        batch_size = compute_batch_size(model, len(cam_keys))
+
+        # Fresh stop event for this business-hours cycle
+        scheduler_stop_event = threading.Event()
+
+        _scheduler = InferenceScheduler(
+            model=model,
+            frame_buffer=frame_buffer,
+            result_queues=result_queues,
+            batch_size=batch_size,
+            cam_keys=cam_keys,
+            customer_cls_ids=customer_cls_ids,
+            staff_cls_ids=staff_cls_ids,
+            stop_event=scheduler_stop_event,
+            conf_threshold=CONF_THRESHOLD,
+            device=DEVICE,
+            min_w=MIN_W,
+            min_h=MIN_H,
+        )
+        _scheduler.start()
         logger.info(f"🎬 Starting {len(RTSP_CAMERAS)} camera thread(s)...")
 
+        threads = []
         for cam in RTSP_CAMERAS:
             cam_key = cam["camera_id"]
-            # Fresh events every cycle so previous-cycle .set() doesn't leak.
             restart_events[cam_key] = Event()
-            stop_events[cam_key] = Event()
+            stop_events[cam_key]    = Event()
             last_frame_time[cam_key] = time.time()
+
+            dt = Thread(
+                target=decode_loop, args=(cam,),
+                daemon=True, name=f"decode-{cam_key}",
+            )
+            st = Thread(
+                target=state_machine_loop, args=(cam,),
+                daemon=True, name=f"state-{cam_key}",
+            )
+            dt.start()
+            st.start()
+            threads.extend([dt, st])
+            logger.info(f"  🎬 → {cam_key} ({cam['site_name']}) | mode={cam['zone_mode']}")
 
         if watchdog_thread_obj is None or not watchdog_thread_obj.is_alive():
             watchdog_thread_obj = Thread(target=watchdog_thread, daemon=True, name="watchdog")
             watchdog_thread_obj.start()
 
-        threads = []
-        for cam in RTSP_CAMERAS:
-            t = Thread(target=run_camera, args=(cam,), daemon=True, name=cam["camera_id"])
-            t.start()
-            threads.append(t)
-            logger.info(f"  🎬 → {cam['camera_id']} ({cam['site_name']}) | mode={cam['zone_mode']}")
         return threads
 
-    def _stop_camera_threads(threads):
-        """Signal stop, join with timeout, then unload model only if all exited."""
-        logger.info(f"🛑 Stopping {len(threads)} camera thread(s)...")
-        # Signal stop FIRST, then nudge inner loop via restart event.
+    def _stop_camera_threads(threads: list) -> bool:
+        """Signal stop for scheduler + all decode/state threads, then join."""
+        logger.info(f"🛑 Stopping {len(threads) // 2} camera(s)...")
+
+        # Stop InferenceScheduler first — no more GPU calls
+        scheduler_stop_event.set()
+
         for cam in RTSP_CAMERAS:
             cam_key = cam["camera_id"]
             if cam_key in stop_events:
@@ -895,11 +959,11 @@ if __name__ == "__main__":
         for t in threads:
             t.join(timeout=15)
 
+        if _scheduler is not None and _scheduler.is_alive():
+            _scheduler.join(timeout=10)
+
         alive = [t for t in threads if t.is_alive()]
         if alive:
-            # Stuck threads (likely blocked in cv2.VideoCapture open). Leave them
-            # as daemons — they'll die with the process. Do NOT unload the model;
-            # they may still call .predict() and segfault on freed CUDA memory.
             logger.warning(
                 f"⚠️  {len(alive)} thread(s) did not exit in time: "
                 f"{[t.name for t in alive]} — skipping model unload"
@@ -941,23 +1005,60 @@ if __name__ == "__main__":
 
             # In business hours: reset idle tracker, also reap dead threads.
             last_idle_log_min = None
-            # Detect a thread that exited unexpectedly (e.g. RTSP died and outer
-            # loop honored stop, or fatal crash). Restart it without reloading
-            # the model.
+            # Detect decode/state threads that exited unexpectedly and respawn
+            # them independently. Thread names are "decode-<cam>" / "state-<cam>".
             for i, t in enumerate(list(active_threads)):
-                if not t.is_alive():
-                    cam = next((c for c in RTSP_CAMERAS if c["camera_id"] == t.name), None)
-                    if cam is None:
-                        active_threads.remove(t)
-                        continue
-                    cam_key = cam["camera_id"]
-                    logger.warning(f"♻️  Thread {cam_key} not alive — respawning")
-                    stop_events[cam_key] = Event()
+                if t.is_alive():
+                    continue
+                name = t.name
+                if name.startswith("decode-"):
+                    cam_key = name[len("decode-"):]
+                    target  = decode_loop
+                    is_decode = True
+                elif name.startswith("state-"):
+                    cam_key = name[len("state-"):]
+                    target  = state_machine_loop
+                    is_decode = False
+                else:
+                    active_threads.remove(t)
+                    continue
+
+                cam = next((c for c in RTSP_CAMERAS if c["camera_id"] == cam_key), None)
+                if cam is None:
+                    active_threads.remove(t)
+                    continue
+
+                logger.warning(f"♻️  Thread {name} not alive — respawning")
+                # Only the decode thread owns stop/restart events + frame timestamp.
+                if is_decode:
+                    stop_events[cam_key]    = Event()
                     restart_events[cam_key] = Event()
                     last_frame_time[cam_key] = time.time()
-                    nt = Thread(target=run_camera, args=(cam,), daemon=True, name=cam_key)
-                    nt.start()
-                    active_threads[i] = nt
+                nt = Thread(target=target, args=(cam,), daemon=True, name=name)
+                nt.start()
+                active_threads[i] = nt
+
+            # Respawn InferenceScheduler if it died unexpectedly.
+            if _scheduler is not None and not _scheduler.is_alive():
+                logger.error("💀 InferenceScheduler died — respawning")
+                scheduler_stop_event.clear()
+                cam_keys   = [c["camera_id"] for c in RTSP_CAMERAS]
+                batch_size = compute_batch_size(model, len(cam_keys))
+                _scheduler = InferenceScheduler(
+                    model=model,
+                    frame_buffer=frame_buffer,
+                    result_queues=result_queues,
+                    batch_size=batch_size,
+                    cam_keys=cam_keys,
+                    customer_cls_ids=customer_cls_ids,
+                    staff_cls_ids=staff_cls_ids,
+                    stop_event=scheduler_stop_event,
+                    conf_threshold=CONF_THRESHOLD,
+                    device=DEVICE,
+                    min_w=MIN_W,
+                    min_h=MIN_H,
+                )
+                _scheduler.start()
 
             time.sleep(5)
 
