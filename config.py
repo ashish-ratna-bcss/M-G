@@ -413,6 +413,32 @@ RTSP_CAMERAS = [
         "entry_zone_1_ratios": [[0.0412844037, 0.6804281346], [0.0550458716, 0.7762487258], [0.0894495413, 0.876146789], [0.1651376147, 0.7986748216], [0.0940366972, 0.5948012232]],
         "entry_zone_2_ratios": [[0.0584862385, 0.0565749235], [0.5676605505, 0.0280326198], [0.6605504587, 0.6845056065], [0.2419724771, 0.9291539246]],
     },
+
+    # Tamil Nadu Cameras Below
+
+    # index: 31
+    # ── COIMBATORE — polygon zones
+    {
+        "rtsp_url": "rtsp://Bluecloud:User%401964@183.82.251.16:8001/Streaming/Channels/601",
+        "camera_id": "GF-40-CAM-6",
+        "site_id": "40",
+        "site_name": "coimbatore-store",
+        "zone_mode": "poly",
+        "entry_zone_1_ratios": [[0.2856, 0.4806], [0.3452, 0.4419], [0.4151, 0.5418], [0.2856, 0.6315]],
+        "entry_zone_2_ratios": [[0.6778, 0.2462], [0.7122, 0.9659], [0.2271, 0.9842], [0.2305, 0.1789]],
+    },
+
+    # index: 32
+    # ── CHENNAI ANNANAGAR — polygon zones
+    {
+        "rtsp_url": "rtsp://Bluecloud:User%401964@49.207.187.203:8001/Streaming/Channels/1101",
+        "camera_id": "GF-41-CAM-11",
+        "site_id": "41",
+        "site_name": "chennai-annanagar-store",
+        "zone_mode": "poly",
+        "entry_zone_1_ratios": [[0.4048, 0.1422], [0.4025, 0.2095], [0.4713, 0.2095], [0.4667, 0.1422]],
+        "entry_zone_2_ratios": [[0.3062, 0.0219], [0.5734, 0.028], [0.7695, 0.6091], [0.1938, 0.6233]],
+    },
 ]
 
 # Ensure all RTSP URLs include recommended FFmpeg/OpenCV capture options
