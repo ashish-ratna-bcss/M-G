@@ -38,6 +38,7 @@ from config import (
     GREET_GAP_TOLERANCE, RECT2_ABSENCE_ABORT_SEC, COOLDOWN_SEC, POST_SAVE_COOLDOWN_SEC,
     CONF_THRESHOLD, GREEN_STAFF_LABELS, CUSTOMER_LABEL,
     MAX_FPS, FRAME_INTERVAL, MIN_W, MIN_H,
+    NUM_INFERENCE_WORKERS,
     PANEL_W, PREVIEW_WINDOW_W, PREVIEW_WINDOW_H,
     OUTPUT_BASE_DIR, LOG_DIR, LOG_FILE, LOG_BACKUP_COUNT,
     # time-based options
@@ -74,15 +75,16 @@ last_frame_time = {}
 restart_events  = {}   # signal: break inner loop -> reconnect RTSP
 stop_events     = {}   # signal: exit outer loop -> terminate thread
 
-# Model will be loaded/unloaded dynamically based on business hours
-model = None
+# Models loaded/unloaded dynamically based on business hours.
+# One model instance per inference worker (NUM_INFERENCE_WORKERS).
+models: list = []
 
 # Shared inference pipeline structures (initialised in load_model_on_gpu)
 zones_dict: dict = {}                    # cam_key → zone pixel coords (built on first decode frame)
 result_queues: dict = {}                 # cam_key → Queue[InferenceResult]
 frame_buffer: FrameBuffer | None = None  # single-slot per camera
 scheduler_stop_event: threading.Event = threading.Event()
-_scheduler: InferenceScheduler | None = None
+_schedulers: list = []                   # one InferenceScheduler per worker
  
 # ===================== PATH BUILDER =====================
 def get_output_path(event_type, site_name, camera_id, site_id, dur_str):
@@ -729,19 +731,29 @@ customer_cls_ids: list = []
 staff_cls_ids: list    = []
 
 def load_model_on_gpu() -> None:
-    """Load model, compute batch size, initialise FrameBuffer + result queues."""
-    global model, customer_cls_ids, staff_cls_ids, frame_buffer, result_queues, scheduler_stop_event
+    """Load N model instances (one per worker), init FrameBuffer + result queues."""
+    global models, customer_cls_ids, staff_cls_ids, frame_buffer, result_queues, scheduler_stop_event
 
-    if model is not None:
+    if models:
         return  # already loaded
 
-    logger.info(f"🧠 Loading model to {DEVICE.upper()} (CUDA Available: {torch.cuda.is_available()})")
-    model = YOLO(MODEL_PATH)
-    model.to(DEVICE)
+    n_workers = max(1, NUM_INFERENCE_WORKERS)
+    logger.info(
+        f"🧠 Loading {n_workers} model instance(s) to {DEVICE.upper()} "
+        f"(CUDA Available: {torch.cuda.is_available()})"
+    )
 
+    models = []
+    for i in range(n_workers):
+        m = YOLO(MODEL_PATH)
+        m.to(DEVICE)
+        models.append(m)
+        logger.info(f"  🧠 model instance {i + 1}/{n_workers} loaded")
+
+    # Resolve class IDs from first instance (all share the same weights file)
     customer_cls_ids = []
     staff_cls_ids    = []
-    for idx, name in model.names.items():
+    for idx, name in models[0].names.items():
         name_low = name.lower()
         if CUSTOMER_LABEL in name_low:
             customer_cls_ids.append(idx)
@@ -751,52 +763,51 @@ def load_model_on_gpu() -> None:
     if not customer_cls_ids:
         raise RuntimeError(
             f"Model class names do not contain '{CUSTOMER_LABEL}'. "
-            f"Available: {list(model.names.values())}. "
+            f"Available: {list(models[0].names.values())}. "
             f"Fix CUSTOMER_LABEL in config.py."
         )
     if not staff_cls_ids:
         raise RuntimeError(
             f"Model class names do not match any of {GREEN_STAFF_LABELS}. "
-            f"Available: {list(model.names.values())}. "
+            f"Available: {list(models[0].names.values())}. "
             f"Fix GREEN_STAFF_LABELS in config.py."
         )
 
-    logger.info(f"✅ Model loaded | Customer IDs: {customer_cls_ids} | Staff IDs: {staff_cls_ids}")
+    logger.info(f"✅ Models loaded | Customer IDs: {customer_cls_ids} | Staff IDs: {staff_cls_ids}")
 
     cam_keys      = [c["camera_id"] for c in RTSP_CAMERAS]
-    batch_size    = compute_batch_size(model, len(cam_keys))
     frame_buffer  = FrameBuffer(cam_keys)
     result_queues = {k: _queue.Queue(maxsize=2) for k in cam_keys}
     scheduler_stop_event = threading.Event()
     logger.info(
-        f"🗂️  FrameBuffer + result_queues initialised | "
-        f"cameras={len(cam_keys)} batch_size={batch_size}"
+        f"🗂️  FrameBuffer + result_queues initialised | cameras={len(cam_keys)}"
     )
 
 
 def unload_model_from_gpu() -> None:
-    """Stop InferenceScheduler, unload model, free GPU memory."""
-    global model, _scheduler
+    """Stop all InferenceScheduler workers, unload models, free GPU memory."""
+    global models, _schedulers
 
-    if _scheduler is not None and _scheduler.is_alive():
-        logger.info("⏹️  Stopping InferenceScheduler...")
+    if _schedulers:
+        logger.info(f"⏹️  Stopping {len(_schedulers)} InferenceScheduler worker(s)...")
         scheduler_stop_event.set()
-        _scheduler.join(timeout=10)
-        if _scheduler.is_alive():
-            logger.warning("⚠️  InferenceScheduler did not stop in time")
-        _scheduler = None
+        for s in _schedulers:
+            s.join(timeout=10)
+            if s.is_alive():
+                logger.warning(f"⚠️  {s.name} did not stop in time")
+        _schedulers = []
 
-    if model is None:
+    if not models:
         return
 
-    logger.info("🧹 Unloading model from GPU...")
-    model = None
+    logger.info("🧹 Unloading models from GPU...")
+    models = []
     gc.collect()
     try:
         torch.cuda.empty_cache()
     except Exception:
         pass
-    logger.info("✅ Model unloaded, GPU memory freed")
+    logger.info("✅ Models unloaded, GPU memory freed")
 
 # ===================== WATCHDOG =====================
 def watchdog_thread():
@@ -889,31 +900,42 @@ if __name__ == "__main__":
     watchdog_thread_obj = None
 
     def _start_camera_threads() -> list:
-        """Start InferenceScheduler + decode + state_machine threads."""
-        global _scheduler, scheduler_stop_event, watchdog_thread_obj
+        """Start N InferenceScheduler workers + decode + state_machine threads."""
+        global _schedulers, scheduler_stop_event, watchdog_thread_obj
         load_model_on_gpu()
 
         cam_keys   = [c["camera_id"] for c in RTSP_CAMERAS]
-        batch_size = compute_batch_size(model, len(cam_keys))
+        n_workers  = len(models)
+        batch_size = compute_batch_size(models[0], len(cam_keys), n_workers)
 
         # Fresh stop event for this business-hours cycle
         scheduler_stop_event = threading.Event()
 
-        _scheduler = InferenceScheduler(
-            model=model,
-            frame_buffer=frame_buffer,
-            result_queues=result_queues,
-            batch_size=batch_size,
-            cam_keys=cam_keys,
-            customer_cls_ids=customer_cls_ids,
-            staff_cls_ids=staff_cls_ids,
-            stop_event=scheduler_stop_event,
-            conf_threshold=CONF_THRESHOLD,
-            device=DEVICE,
-            min_w=MIN_W,
-            min_h=MIN_H,
-        )
-        _scheduler.start()
+        # Spawn one scheduler per worker, each owns an interleaved camera slice.
+        _schedulers = []
+        for i in range(n_workers):
+            worker_cams = cam_keys[i::n_workers]   # interleaved split
+            if not worker_cams:
+                continue
+            sched = InferenceScheduler(
+                model=models[i],
+                frame_buffer=frame_buffer,
+                result_queues=result_queues,
+                batch_size=batch_size,
+                cam_keys=worker_cams,
+                customer_cls_ids=customer_cls_ids,
+                staff_cls_ids=staff_cls_ids,
+                stop_event=scheduler_stop_event,
+                conf_threshold=CONF_THRESHOLD,
+                device=DEVICE,
+                min_w=MIN_W,
+                min_h=MIN_H,
+            )
+            sched.name = f"InferenceScheduler-{i}"
+            sched.start()
+            _schedulers.append(sched)
+            logger.info(f"  ⚙️  worker {i} → {len(worker_cams)} cams, batch={batch_size}")
+
         logger.info(f"🎬 Starting {len(RTSP_CAMERAS)} camera thread(s)...")
 
         threads = []
@@ -959,8 +981,9 @@ if __name__ == "__main__":
         for t in threads:
             t.join(timeout=15)
 
-        if _scheduler is not None and _scheduler.is_alive():
-            _scheduler.join(timeout=10)
+        for s in _schedulers:
+            if s.is_alive():
+                s.join(timeout=10)
 
         alive = [t for t in threads if t.is_alive()]
         if alive:
@@ -1038,27 +1061,33 @@ if __name__ == "__main__":
                 nt.start()
                 active_threads[i] = nt
 
-            # Respawn InferenceScheduler if it died unexpectedly.
-            if _scheduler is not None and not _scheduler.is_alive():
-                logger.error("💀 InferenceScheduler died — respawning")
-                scheduler_stop_event.clear()
-                cam_keys   = [c["camera_id"] for c in RTSP_CAMERAS]
-                batch_size = compute_batch_size(model, len(cam_keys))
-                _scheduler = InferenceScheduler(
-                    model=model,
-                    frame_buffer=frame_buffer,
-                    result_queues=result_queues,
-                    batch_size=batch_size,
-                    cam_keys=cam_keys,
-                    customer_cls_ids=customer_cls_ids,
-                    staff_cls_ids=staff_cls_ids,
-                    stop_event=scheduler_stop_event,
-                    conf_threshold=CONF_THRESHOLD,
-                    device=DEVICE,
-                    min_w=MIN_W,
-                    min_h=MIN_H,
-                )
-                _scheduler.start()
+            # Respawn any InferenceScheduler worker that died unexpectedly.
+            if _schedulers and not scheduler_stop_event.is_set():
+                cam_keys  = [c["camera_id"] for c in RTSP_CAMERAS]
+                n_workers = len(models)
+                for i, s in enumerate(list(_schedulers)):
+                    if s.is_alive():
+                        continue
+                    logger.error(f"💀 {s.name} died — respawning")
+                    worker_cams = cam_keys[i::n_workers]
+                    batch_size  = compute_batch_size(models[i], len(cam_keys), n_workers)
+                    ns = InferenceScheduler(
+                        model=models[i],
+                        frame_buffer=frame_buffer,
+                        result_queues=result_queues,
+                        batch_size=batch_size,
+                        cam_keys=worker_cams,
+                        customer_cls_ids=customer_cls_ids,
+                        staff_cls_ids=staff_cls_ids,
+                        stop_event=scheduler_stop_event,
+                        conf_threshold=CONF_THRESHOLD,
+                        device=DEVICE,
+                        min_w=MIN_W,
+                        min_h=MIN_H,
+                    )
+                    ns.name = f"InferenceScheduler-{i}"
+                    ns.start()
+                    _schedulers[i] = ns
 
             time.sleep(5)
 

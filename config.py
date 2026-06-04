@@ -518,6 +518,14 @@ FRAME_INTERVAL = 1.0 / MAX_FPS
 PREVIEW_WINDOW_W = 1280
 PREVIEW_WINDOW_H = 720
 
+# ===================== INFERENCE WORKERS =====================
+# Number of parallel GPU inference workers. Each worker loads its own model
+# instance and owns an interleaved slice of cameras (cams[i::N]). More workers
+# overlap CPU pre/post-processing with GPU compute and shorten each worker's
+# round-robin rotation (faster per-camera revisit). VRAM budget is split across
+# workers automatically. 2 is a good default for a single shared GPU.
+NUM_INFERENCE_WORKERS = 2
+
 # ===================== DISPLAY & HEADLESS MODE =====================
 HEADLESS = False
 PANEL_W = 300

@@ -30,33 +30,35 @@ class InferenceResult:
     green_staff: list          # list of np.ndarray [x1,y1,x2,y2] int
 
 
-def compute_batch_size(model, num_cameras: int) -> int:
+def compute_batch_size(model, num_cameras: int, num_workers: int = 1) -> int:
     """
-    Compute batch size from currently free VRAM.
+    Compute per-worker batch size from currently free VRAM.
     Conservative: 8 MB per frame slot (640x640 RGB FP32 + YOLO activations).
-    Caps at min(free_budget, num_cameras, 16).
-    Falls back to 1 on CPU.
+    VRAM budget is split across num_workers (each worker runs concurrent batches).
+    Caps at min(per-worker budget, cameras-per-worker, 16). Falls back to 1 on CPU.
     """
     if not torch.cuda.is_available():
         logger.info("compute_batch_size: no CUDA → batch_size=1")
         return 1
 
+    num_workers = max(1, num_workers)
     free_vram, _ = torch.cuda.mem_get_info()
     # 8 MB conservative estimate per frame in batch
     frame_vram_bytes = 8 * 1024 * 1024
-    # Keep 25% headroom for other processes sharing the GPU
-    usable = free_vram * 0.75
+    # Keep 25% headroom, then split across concurrent workers
+    usable = (free_vram * 0.75) / num_workers
+    cams_per_worker = max(1, num_cameras // num_workers)
     batch_size = max(1, min(
         int(usable / frame_vram_bytes),
-        num_cameras,
+        cams_per_worker,
         16,
     ))
     logger.info(
         f"compute_batch_size: free_vram={free_vram / 1e9:.2f}GB "
-        f"usable={usable / 1e9:.2f}GB "
+        f"workers={num_workers} usable/worker={usable / 1e9:.2f}GB "
         f"batch_size={batch_size} "
-        f"(capped at min(budget={int(usable / frame_vram_bytes)}, "
-        f"cams={num_cameras}, max=16))"
+        f"(min(budget={int(usable / frame_vram_bytes)}, "
+        f"cams/worker={cams_per_worker}, max=16))"
     )
     return batch_size
 
