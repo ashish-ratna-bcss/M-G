@@ -27,6 +27,7 @@ import logging
 import json
 import gc
 from logging.handlers import TimedRotatingFileHandler
+import threading
 from threading import Thread, Event
  
 # ===================== CONFIG (imported) =====================
@@ -46,6 +47,10 @@ from config import (
 import torch
 import argparse
 import sys
+import collections
+import queue as _queue
+from frame_buffer import FrameBuffer
+from inference_scheduler import InferenceResult, InferenceScheduler, compute_batch_size
  
 # ===================== LOGGING =====================
 os.makedirs(LOG_DIR, exist_ok=True)
@@ -71,6 +76,13 @@ stop_events     = {}   # signal: exit outer loop -> terminate thread
 
 # Model will be loaded/unloaded dynamically based on business hours
 model = None
+
+# Shared inference pipeline structures (initialised in load_model_on_gpu)
+zones_dict: dict = {}                    # cam_key → zone pixel coords (built on first decode frame)
+result_queues: dict = {}                 # cam_key → Queue[InferenceResult]
+frame_buffer: FrameBuffer | None = None  # single-slot per camera
+scheduler_stop_event: threading.Event = threading.Event()
+_scheduler: InferenceScheduler | None = None
  
 # ===================== PATH BUILDER =====================
 def get_output_path(event_type, site_name, camera_id, site_id, dur_str):
@@ -300,7 +312,109 @@ def draw_hud(frame, state, cfg, now_ts):
    
     return np.hstack((frame, hud))
  
-# ===================== CAMERA THREAD =====================
+# ===================== DECODE THREAD =====================
+def decode_loop(cfg: dict) -> None:
+    """
+    RTSP decode only — no inference.
+    Writes latest frame to shared frame_buffer.
+    Builds zone pixel coords on first frame and stores in zones_dict.
+    """
+    cam_key  = cfg["camera_id"]
+    rtsp_url = cfg["rtsp_url"]
+    mode     = cfg["zone_mode"]
+
+    last_frame_time[cam_key] = time.time()
+    _last_throttle_key = cam_key + "_throttle"
+
+    cap = None
+    while not stop_events[cam_key].is_set():
+        try:
+            cap = make_fresh_cap(rtsp_url)
+            logger.info(f"🎥 STARTED → {cam_key} ({cfg['site_name']}) | mode={mode}")
+
+            first_frame_logged = False
+            first_frame_start  = time.time()
+            failed_reads       = 0
+            buffer_flush_count = 4   # updated after first frame using actual stream FPS
+
+            while not stop_events[cam_key].is_set():
+                # ── Watchdog restart ─────────────────────────────────────────
+                if restart_events[cam_key].is_set():
+                    logger.warning(f"🔄 Watchdog restart → {cam_key}")
+                    restart_events[cam_key].clear()
+                    break
+
+                # ── Drain stale frames dynamically ────────────────────────────
+                for _ in range(buffer_flush_count):
+                    cap.grab()
+                ret, frame = cap.retrieve()
+
+                if not ret:
+                    failed_reads += 1
+                    if failed_reads >= 30:
+                        logger.warning(f"🔄 30 failed reads, reconnecting → {cam_key}")
+                        break
+                    time.sleep(0.1)
+                    continue
+                failed_reads = 0
+
+                frame_timestamp = time.time()
+                last_frame_time[cam_key] = frame_timestamp
+
+                frame = cv2.resize(frame, (PREVIEW_WINDOW_W, PREVIEW_WINDOW_H))
+
+                # ── First frame: build zones + calibrate flush count ──────────
+                if not first_frame_logged:
+                    if time.time() - first_frame_start > 10:
+                        logger.warning(f"⏳ First frame took >10s → {cam_key}")
+                    frame_h, frame_w = frame.shape[:2]
+                    fps_cam = cap.get(cv2.CAP_PROP_FPS) or 25.0
+                    logger.info(f"📊 {cam_key} Resolution: {frame_w}x{frame_h} @ {fps_cam:.1f} FPS")
+
+                    # Flush enough frames to cover scheduler worst-case latency.
+                    # Use min(fps*0.5, 15) as safe heuristic; never below 2.
+                    buffer_flush_count = max(2, min(int(fps_cam * 0.5), 15))
+
+                    # Build zone pixel coords once; store for state machine
+                    z1_px = ratios_to_poly(cfg["entry_zone_1_ratios"], frame_w, frame_h)
+                    z2_px = ratios_to_poly(cfg["entry_zone_2_ratios"], frame_w, frame_h)
+                    zones_dict[cam_key] = {
+                        "zone1_px"   : z1_px,
+                        "zone2_px"   : z2_px,
+                        "zone1_rect" : ratios_to_rect(cfg["entry_zone_1_ratios"], frame_w, frame_h),
+                        "zone2_rect" : ratios_to_rect(cfg["entry_zone_2_ratios"], frame_w, frame_h),
+                    }
+                    first_frame_logged = True
+
+                # ── FPS throttle ──────────────────────────────────────────────
+                if frame_timestamp - last_frame_time.get(_last_throttle_key, 0) < FRAME_INTERVAL:
+                    continue
+                last_frame_time[_last_throttle_key] = frame_timestamp
+
+                # ── Write to shared frame buffer ──────────────────────────────
+                if frame_buffer is not None:
+                    frame_buffer.write(cam_key, frame, frame_timestamp)
+
+        except Exception as e:
+            logger.error(f"❌ Decode crash in {cam_key}: {str(e)}", exc_info=True)
+            stop_events[cam_key].wait(timeout=5)
+        finally:
+            if cap is not None:
+                try:
+                    cap.release()
+                    logger.info(f"🔌 cap released → {cam_key}")
+                except Exception:
+                    pass
+                cap = None
+
+        if stop_events[cam_key].is_set():
+            break
+        stop_events[cam_key].wait(timeout=3)
+
+    logger.info(f"🛑 DECODE EXITED → {cam_key}")
+
+
+# ===================== CAMERA THREAD (legacy — replaced by decode_loop + state_machine_loop) =====================
 def run_camera(cfg):
     cam_key  = cfg["camera_id"]
     rtsp_url = cfg["rtsp_url"]
