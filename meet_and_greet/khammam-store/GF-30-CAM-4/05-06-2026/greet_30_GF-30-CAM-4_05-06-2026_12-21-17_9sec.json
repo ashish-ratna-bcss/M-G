@@ -1,0 +1,17 @@
+{
+  "event_type": "greet",
+  "site_name": "khammam-store",
+  "site_id": "30",
+  "camera_id": "GF-30-CAM-4",
+  "entry_time_epoch": 1780642262.1561944,
+  "coexistence_start_epoch": 1780642262.6968198,
+  "greet_time_epoch": 1780642271.7506967,
+  "entry_to_coexistence_sec": 0.5406253337860107,
+  "coexistence_duration_sec": 9.053876876831055,
+  "duration_str": "9sec",
+  "exit_reason": "legs_exit",
+  "model_path": "/home/ashish-ratna/PMJ/Meet&Greet/best.pt",
+  "entry_time": "2026-06-05T12:21:02.156194+05:30",
+  "coexistence_start_time": "2026-06-05T12:21:02.696820+05:30",
+  "greet_time": "2026-06-05T12:21:11.750697+05:30"
+}

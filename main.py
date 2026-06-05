@@ -20,6 +20,9 @@ os.environ.setdefault(
 import time
 import cv2
 from ultralytics import YOLO
+
+# OpenCV Hershey fonts ship inside opencv-python — no TTF files or system fonts.
+ANNOTATE_FONT = cv2.FONT_HERSHEY_SIMPLEX
 from datetime import datetime, time as dtime, timedelta
 from zoneinfo import ZoneInfo
 import numpy as np
@@ -176,17 +179,66 @@ def staff_intersects_zone(green_staff, zone_pts, mode):
     return [s for s in green_staff if box_in_zone(s, zone_pts, mode)]
  
 # ===================== ANNOTATE HELPERS =====================
-def annotate_banner(img, text):
-    font      = cv2.FONT_HERSHEY_SIMPLEX
-    scale     = 2.0
-    thickness = 4
-    (tw, th), _ = cv2.getTextSize(text, font, scale, thickness)
+def _format_banner_duration(dur_str: str) -> str:
+    """Normalize duration labels for snapshot badges (e.g. 9sec -> 9 sec)."""
+    s = dur_str.strip()
+    if s.endswith("sec") and not s.endswith(" sec"):
+        return s[:-3].strip() + " sec"
+    if s.endswith("mins") and not s.endswith(" mins"):
+        return s[:-4].strip() + " mins"
+    return s
+
+
+def annotate_banner(img, title: str, duration: str = "") -> None:
+    """Compact semi-transparent badge for saved greet snapshots."""
+    font = ANNOTATE_FONT
     h, w = img.shape[:2]
-    bx1, by1 = w - tw - 20, 10
-    bx2, by2 = w - 10, 10 + th + 20
-    cv2.rectangle(img, (bx1, by1), (bx2, by2), (0, 0, 180), -1)
-    cv2.putText(img, text, (bx1 + 10, by1 + th + 10),
-                font, scale, (255, 255, 255), thickness)
+
+    duration = _format_banner_duration(duration)
+    base_scale = max(0.42, min(0.68, w / 2400))
+    title_scale = base_scale
+    dur_scale = base_scale * 0.82
+    title_th = max(1, int(round(base_scale * 2.2)))
+    dur_th = max(1, title_th - 1)
+
+    pad_x = max(10, int(14 * base_scale / 0.55))
+    pad_y = max(6, int(10 * base_scale / 0.55))
+    line_gap = max(2, int(5 * base_scale / 0.55))
+    accent_w = max(3, int(4 * base_scale / 0.55))
+
+    (tw1, th1), _ = cv2.getTextSize(title, font, title_scale, title_th)
+    if duration:
+        (tw2, th2), _ = cv2.getTextSize(duration, font, dur_scale, dur_th)
+    else:
+        tw2, th2 = 0, 0
+
+    badge_w = max(tw1, tw2) + pad_x * 2 + accent_w
+    badge_h = th1 + (th2 + line_gap if duration else 0) + pad_y * 2
+
+    margin = max(12, int(w * 0.007))
+    bx2 = w - margin
+    bx1 = bx2 - badge_w
+    by1 = margin
+    by2 = by1 + badge_h
+
+    roi = img[by1:by2, bx1:bx2]
+    overlay = roi.copy()
+    cv2.rectangle(overlay, (0, 0), (badge_w, badge_h), (22, 22, 22), -1)
+    cv2.rectangle(overlay, (0, 0), (accent_w, badge_h), (0, 175, 110), -1)
+    cv2.addWeighted(overlay, 0.70, roi, 0.30, 0, roi)
+
+    tx = bx1 + pad_x + accent_w
+    ty_title = by1 + pad_y + th1
+    cv2.putText(
+        img, title, (tx, ty_title), font, title_scale,
+        (255, 255, 255), title_th, cv2.LINE_AA,
+    )
+    if duration:
+        ty_dur = ty_title + line_gap + th2
+        cv2.putText(
+            img, duration, (tx, ty_dur), font, dur_scale,
+            (170, 215, 195), dur_th, cv2.LINE_AA,
+        )
  
 # ===================== DRAW ZONES ON PREVIEW =====================
 def draw_zones_on_preview(preview, zones, rect2_confirmed, mode):
@@ -475,11 +527,11 @@ def state_machine_loop(cfg: dict) -> None:
         for b in cust_boxes:
             cv2.rectangle(snap, (b[0], b[1]), (b[2], b[3]), (0, 255, 0), 4)
             cv2.putText(snap, "CUSTOMER", (b[0], b[1] - 10),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+                        ANNOTATE_FONT, 0.8, (0, 255, 0), 2, cv2.LINE_AA)
         for b in staff_boxes:
             cv2.rectangle(snap, (b[0], b[1]), (b[2], b[3]), (0, 0, 255), 4)
             cv2.putText(snap, "STAFF", (b[0], b[1] - 10),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+                        ANNOTATE_FONT, 0.8, (0, 0, 255), 2, cv2.LINE_AA)
         if cust_boxes or staff_boxes:
             all_boxes = list(cust_boxes) + list(staff_boxes)
             gx1 = min(b[0] for b in all_boxes)
@@ -487,7 +539,7 @@ def state_machine_loop(cfg: dict) -> None:
             gx2 = max(b[2] for b in all_boxes)
             gy2 = max(b[3] for b in all_boxes)
             cv2.rectangle(snap, (gx1, gy1), (gx2, gy2), (0, 255, 255), 4)
-        annotate_banner(snap, f"MEET & GREET ({dur_str})")
+        annotate_banner(snap, "MEET & GREET", dur_str)
 
         greet_path = get_output_path(
             event_type="greet",
