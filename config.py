@@ -19,7 +19,7 @@ def _resolve_model_path() -> str:
     `security_latest 2.pt`. Return its absolute path if present,
     otherwise raise FileNotFoundError.
     """
-    expected_name = "security_latest 2.pt"
+    expected_name = "best.pt" #"security_latest 2.pt"
     expected_path = BASE_DIR / expected_name
     if expected_path.exists():
         return str(expected_path)
@@ -490,7 +490,7 @@ BUSINESS_END = dtime(21, 0)    # 09:00 PM
 
 # ===================== ENTRY ZONE (Zone-1) Parameters =====================
 ENTRY_MARGIN = 5
-ENTRY_DEBOUNCE_FRAMES = 2
+ENTRY_DEBOUNCE_FRAMES = 3
 
 # Time-based entry confirmation (alternative to frame-count debouncing)
 # If `USE_TIME_BASED_ENTRY` is True, the system will require the customer
@@ -528,7 +528,16 @@ POST_SAVE_COOLDOWN_SEC = 2.0
 CONF_THRESHOLD = 0.30
 MIN_W, MIN_H = 40, 100
 CUSTOMER_LABEL = "customers"
-GREEN_STAFF_LABELS = {"sec1", "sec2", "sec3"}
+GREEN_STAFF_LABELS = {
+    "sec1",
+    "sec2",
+    "sec3",
+    "sec4",
+    "sec5",
+    "sec6",
+    "sec7",
+    "sec8",
+}
 # Per-label confidence thresholds to reduce misclassification
 # Detections classified as `CUSTOMER_LABEL` must meet this confidence
 # to be considered a customer in downstream logic.
