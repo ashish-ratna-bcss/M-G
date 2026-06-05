@@ -17,12 +17,72 @@ os.environ.setdefault(
     "rtsp_transport;tcp|stimeout;5000000|reconnect;1|reconnect_streamed;1|reconnect_delay_max;5",
 )
 
+
+def _prime_qt_system_fonts() -> None:
+    """Point Qt at OS font directories before OpenCV's Qt backend initializes."""
+    if os.environ.get("QT_QPA_FONTDIR"):
+        return
+    for path in (
+        "/usr/share/fonts",
+        "/usr/local/share/fonts",
+        os.path.expanduser("~/.local/share/fonts"),
+        os.path.expanduser("~/.fonts"),
+    ):
+        if os.path.isdir(path):
+            os.environ["QT_QPA_FONTDIR"] = path
+            break
+
+
+_prime_qt_system_fonts()
+
 import time
 import cv2
 from ultralytics import YOLO
 
 # OpenCV Hershey fonts ship inside opencv-python — no TTF files or system fonts.
 ANNOTATE_FONT = cv2.FONT_HERSHEY_SIMPLEX
+
+
+def _ensure_cv2_qt_fonts() -> None:
+    """OpenCV's Qt highgui expects TTFs under cv2/qt/fonts; pip wheels no longer ship them."""
+    qt_font_dir = os.path.join(os.path.dirname(cv2.__file__), "qt", "fonts")
+    try:
+        if os.path.isdir(qt_font_dir) and any(
+            os.path.isfile(os.path.join(qt_font_dir, name))
+            for name in os.listdir(qt_font_dir)
+        ):
+            return
+    except OSError:
+        pass
+
+    dejavu_names = ("DejaVuSans.ttf", "DejaVuSans-Bold.ttf")
+    search_roots = (
+        "/usr/share/fonts/truetype/dejavu",
+        "/usr/share/fonts/dejavu",
+        "/usr/share/fonts/TTF",
+        "/usr/local/share/fonts/truetype/dejavu",
+    )
+    try:
+        os.makedirs(qt_font_dir, exist_ok=True)
+    except OSError:
+        return
+
+    for root in search_roots:
+        if not os.path.isdir(root):
+            continue
+        for name in dejavu_names:
+            src = os.path.join(root, name)
+            if not os.path.isfile(src):
+                continue
+            dst = os.path.join(qt_font_dir, name)
+            if not os.path.lexists(dst):
+                try:
+                    os.symlink(src, dst)
+                except OSError:
+                    pass
+
+
+_ensure_cv2_qt_fonts()
 from datetime import datetime, time as dtime, timedelta
 from zoneinfo import ZoneInfo
 import numpy as np
@@ -493,6 +553,7 @@ def state_machine_loop(cfg: dict) -> None:
 
     win_name = f"Meet & Greet — {cam_key}"
     if not HEADLESS:
+        _ensure_cv2_qt_fonts()
         cv2.namedWindow(win_name, cv2.WINDOW_NORMAL)
 
     q = result_queues.get(cam_key)
