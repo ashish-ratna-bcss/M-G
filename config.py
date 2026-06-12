@@ -6,7 +6,10 @@ All algorithm-driving parameters and camera configurations
 
 from datetime import time as dtime
 from pathlib import Path
-from zoneinfo import ZoneInfo
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:
+    from backports.zoneinfo import ZoneInfo
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -484,7 +487,13 @@ for cam in RTSP_CAMERAS:
     )
 
 # ===================== BUSINESS HOURS & TIMEZONE =====================
-IST = ZoneInfo("Asia/Kolkata")
+try:
+    IST = ZoneInfo("Asia/Kolkata")
+except Exception:
+    # Windows without tzdata package: fall back to fixed UTC+5:30 offset.
+    # IST has no DST so fixed offset is always correct.
+    from datetime import timezone, timedelta as _td
+    IST = timezone(_td(hours=5, minutes=30))
 BUSINESS_START = dtime(10, 0)  # 10:00 AM
 BUSINESS_END = dtime(21, 0)    # 09:00 PM
 

@@ -9,6 +9,17 @@ Unified logic for ALL cameras:
 """
  
 import os
+import sys
+import platform
+import shutil
+
+# Ensure UTF-8 output on all platforms — Windows cp1252 cannot encode emoji.
+if hasattr(sys.stdout, 'reconfigure'):
+    try:
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+        sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+    except Exception:
+        pass
 
 # Configure FFmpeg/RTSP transport + timeouts BEFORE cv2 is imported.
 # stimeout is in microseconds. Prevents indefinite hangs in cap.grab()/open.
@@ -21,6 +32,11 @@ os.environ.setdefault(
 def _prime_qt_system_fonts() -> None:
     """Point Qt at OS font directories before OpenCV's Qt backend initializes."""
     if os.environ.get("QT_QPA_FONTDIR"):
+        return
+    if platform.system() == "Windows":
+        win_fonts = os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "Fonts")
+        if os.path.isdir(win_fonts):
+            os.environ["QT_QPA_FONTDIR"] = win_fonts
         return
     for path in (
         "/usr/share/fonts",
@@ -56,12 +72,16 @@ def _ensure_cv2_qt_fonts() -> None:
         pass
 
     dejavu_names = ("DejaVuSans.ttf", "DejaVuSans-Bold.ttf")
-    search_roots = (
-        "/usr/share/fonts/truetype/dejavu",
-        "/usr/share/fonts/dejavu",
-        "/usr/share/fonts/TTF",
-        "/usr/local/share/fonts/truetype/dejavu",
-    )
+    if platform.system() == "Windows":
+        win_fonts = os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "Fonts")
+        search_roots = (win_fonts,)
+    else:
+        search_roots = (
+            "/usr/share/fonts/truetype/dejavu",
+            "/usr/share/fonts/dejavu",
+            "/usr/share/fonts/TTF",
+            "/usr/local/share/fonts/truetype/dejavu",
+        )
     try:
         os.makedirs(qt_font_dir, exist_ok=True)
     except OSError:
@@ -78,8 +98,11 @@ def _ensure_cv2_qt_fonts() -> None:
             if not os.path.lexists(dst):
                 try:
                     os.symlink(src, dst)
-                except OSError:
-                    pass
+                except (OSError, NotImplementedError):
+                    try:
+                        shutil.copy2(src, dst)
+                    except OSError:
+                        pass
 
 
 _ensure_cv2_qt_fonts()
@@ -117,13 +140,22 @@ from frame_buffer import FrameBuffer
 from inference_scheduler import InferenceResult, InferenceScheduler, compute_batch_size
  
 # ===================== LOGGING =====================
+class _SafeTimedRotatingFileHandler(TimedRotatingFileHandler):
+    """Skips midnight rotation silently on Windows when the log file is locked."""
+    def doRollover(self):
+        try:
+            super().doRollover()
+        except PermissionError:
+            pass
+
 os.makedirs(LOG_DIR, exist_ok=True)
 logger    = logging.getLogger("MeetGreet")
 logger.setLevel(logging.INFO)
 formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
 
-file_handler = TimedRotatingFileHandler(
-    os.path.join(LOG_DIR, LOG_FILE), when="midnight", interval=1, backupCount=LOG_BACKUP_COUNT
+file_handler = _SafeTimedRotatingFileHandler(
+    os.path.join(LOG_DIR, LOG_FILE), when="midnight", interval=1,
+    backupCount=LOG_BACKUP_COUNT, encoding='utf-8',
 )
 file_handler.setFormatter(formatter)
 logger.addHandler(file_handler)
@@ -958,9 +990,14 @@ if __name__ == "__main__":
         HEADLESS = False
         logger.setLevel(logging.DEBUG)
 
-    # Auto-detect display availability on headless servers
-    disp = os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")
-    if not disp:
+    # Auto-detect display availability on headless servers.
+    # Windows and macOS always have a display subsystem; only Linux needs env-var checks.
+    _os = platform.system()
+    if _os in ("Windows", "Darwin"):
+        _has_display = True
+    else:
+        _has_display = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+    if not _has_display:
         if not HEADLESS:
             logger.warning("No display detected (DISPLAY/WAYLAND_DISPLAY unset) — forcing headless mode. GUI will be disabled.")
         HEADLESS = True
